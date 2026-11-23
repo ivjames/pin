@@ -8,24 +8,13 @@ Needs HTTPS or `localhost` (WebCodecs and persistent storage require a secure co
 
     cd cornerpin && python3 -m http.server 8080    # then open http://localhost:8080
 
-## Deploy (nginx)
+## Deploy
 
-Copy this folder to the server, e.g. `/var/www/pin.lab980.com`, and point DNS at it. Start with HTTP only:
+Served at https://pin.lab980.com from the lab980 droplet. `DEPLOY.md` is the runbook; the short form, on the
+droplet as root:
 
-    server {
-        listen 80;
-        listen [::]:80;
-        server_name pin.lab980.com;
-        root /var/www/pin.lab980.com;
-        index index.html;
-        location / { try_files $uri $uri/ =404; }
-    }
-
-    sudo nginx -t && sudo systemctl reload nginx
-
-Once DNS resolves, let certbot add the SSL config:
-
-    sudo certbot --nginx -d pin.lab980.com
+    pin deploy     # sync the checkout to origin/main and stamp the build
+    pin status     # HEAD, live probe, cert days
 
 ## Use
 
@@ -74,6 +63,7 @@ them. A different browser or machine starts empty: import the JSON layout and th
 ## Files
 
     index.html, output.html, css/app.css
+    bin/pin, deploy/nginx.conf.template   operate CLI and vhost (see DEPLOY.md)
     js/main.js       editor, UI, output window
     js/renderer.js   WebGL2 renderer and built-in shaders
     js/geometry.js   homography, triangulation, snapping

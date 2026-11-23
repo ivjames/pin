@@ -978,6 +978,7 @@ async function init() {
     return;
   }
   wire();
+  $('#build').textContent = typeof BUILD === 'string' ? 'build ' + BUILD : '';
   try { await loadAll(); } catch (err) { console.warn('Media library unavailable', err); say('Browser storage is unavailable; media will not persist.', true); }
   const project = await loadSaved();
   relinkMedia(project);
