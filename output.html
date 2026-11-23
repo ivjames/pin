@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cornerpin output</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; background: #000; }
+  #hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    font: 14px/1.4 -apple-system, system-ui, sans-serif; color: #fff; background: rgba(0, 0, 0, .7);
+    padding: 8px 14px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, .25); pointer-events: none;
+  }
+  :fullscreen #hint { display: none; }
+  :fullscreen, :fullscreen canvas { cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="out" width="1920" height="1080"></canvas>
+<div id="hint">Drag this window onto the projector, then click or press F for fullscreen. Esc exits.</div>
+<script>
+  // The editor window draws into #out directly. This page only handles fullscreen.
+  function toggleFullscreen() {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(function () {});
+  }
+  document.addEventListener('click', toggleFullscreen);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+  });
+  if (!window.opener) {
+    document.getElementById('hint').textContent = 'Open this window from the Cornerpin editor with "Open output".';
+  }
+</script>
+</body>
+</html>
