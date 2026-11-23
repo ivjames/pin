@@ -1,0 +1,85 @@
+# Cornerpin — working notes
+
+Browser projection mapping: warp video, images and shader effects onto flat surfaces and boxes, then export the mapped result as MP4. Static, no build.
+
+Served at **https://pin.lab980.com** from the lab980 droplet.
+
+How work lands here — branch, PR, and the fact that merging is not deploying —
+is in `.claude/rules/lab980-conventions.md`, which Claude Code loads
+automatically every session. That file is owned by the lab980 scaffold and is
+overwritten by it; **this** file is the site's own, and everything below is
+about this site rather than about the platform. For the box itself, read the
+`ivjames/lab980.com` repo's `CLAUDE.md`.
+
+## Shape
+
+Fully **static**: the site is files served straight by nginx. No build step,
+no app process, no local port, no pm2, no database. nginx serving the git
+checkout *is* the deployment, so "what's on `main`" and "what's live" differ
+only by a `git reset` on the droplet.
+
+- Repo: `ivjames/pin` · droplet checkout: `/var/www/pin` (the web root)
+- Operate CLI: `bin/pin`, symlinked to `/usr/local/bin/pin`
+- vhost: generated from `deploy/nginx.conf.template` by `pin setup`
+
+## Deploying
+
+On the droplet, as root:
+
+```bash
+pin deploy      # git fetch + reset --hard origin/main (+ build stamp)
+pin status      # HEAD, live probe, cert days remaining
+```
+
+Full runbook, including first-time bring-up: `DEPLOY.md`.
+
+Checking what is actually live, concretely for this site — `pin status`
+on the box, or from anywhere:
+
+```bash
+curl -s -o /dev/null -w 'HTTP %{http_code}\n' https://pin.lab980.com/
+curl -s https://pin.lab980.com/ | grep -o "const BUILD = '[^']*'" | head -1
+```
+
+(The second line reports nothing if the page carries no `BUILD` constant — see
+the deploy stamp note in `DEPLOY.md`. `head -1` because a page that polls its
+own build stamp carries a matching regex literal, which grep otherwise reports
+as a phantom second build.)
+
+## Things worth knowing
+
+- The droplet checkout is the web root, so anything committed here is public
+  except dotfiles and `*.md` (the vhost denies both). That includes `bin/pin`
+  and `deploy/`. Don't commit secrets; there is no `.env` on a static site.
+- **Everything runs in the visitor's browser.** Imported media and the project
+  autosave live in that browser's IndexedDB for this origin; nothing is
+  uploaded and the droplet stores nothing. Changing the fqdn changes the
+  origin, which strands every user's saved media and project.
+- **Chrome only, and HTTPS only.** Offline MP4 export uses WebCodecs
+  (`VideoEncoder`), which needs a secure context; over plain HTTP the export
+  and persistent storage do not work. Real-time recording (MediaRecorder) is
+  the fallback. No other browser is supported or tested.
+- **Two pages, one renderer.** `index.html` is the editor; `output.html` is
+  the projector window, opened by the editor with `window.open`. The editor
+  draws into the output window's canvas directly, so `output.html` does
+  nothing useful when opened on its own, and a pop-up blocker stops the
+  output from opening at all.
+- **The vhost template is not the unmodified scaffold.** It revalidates every
+  `.html`, `.js` and `.css` (unhashed ES modules; a stale `js/main.js` beside
+  a fresh `index.html` is the failure it prevents), and its dotfile deny is
+  the `(?!well-known)` form. `pin setup` leaves an existing vhost alone, so a
+  later change to the template reaches the box only by editing the installed
+  file there or removing it and re-running setup.
+- **`index.html` carries `const BUILD = 'dev'`**, which `pin deploy` rewrites
+  to the deployed short SHA; the editor shows it in the status bar. `dev` on
+  the live site means no deploy has run since the first clone.
+- `vendor/mp4-muxer.js` is a vendored copy of mp4-muxer 5.2.2 (MIT). It is not
+  installed by anything; update it by replacing the file.
+- **No test suite in this repo.** v1 was verified in headless Chrome
+  (editing, warp accuracy, frame-accurate MP4 export, persistence) from
+  scripts that were not committed. It has not been run on a Mac, in
+  fullscreen, or through a real projector.
+- Coordinates in the project model are normalized to the output (0..1), so a
+  layout survives an output-size change. `js/geometry.js` holds the
+  homography; a shape with exactly 4 points warps content to its own corners,
+  and any other point count uses the separate 4-corner `frame`.

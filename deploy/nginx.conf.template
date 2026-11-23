@@ -1,0 +1,54 @@
+# nginx vhost for Cornerpin — plain static site, no app process.
+# Installed by `pin setup` as the vhost for this site. The @@FQDN@@ and
+# @@ROOT@@ placeholders are filled in by sed AT SETUP TIME on the droplet —
+# a deliberately different syntax from the scaffold's own double-underscore
+# placeholders, so the two substitution passes can't eat each other's markers.
+#
+# certbot --nginx adds the :443 block + redirect afterwards, copying this
+# server block — so everything here rides along into the TLS vhost.
+#
+# Note on add_header inheritance: a location{} that sets its own add_header
+# stops inheriting the server-level ones, so the shared security snippet is
+# re-included in every location that adds Cache-Control.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name @@FQDN@@;
+
+    root @@ROOT@@;
+    index index.html;
+
+    include snippets/lab980-security-headers.conf;
+
+    # The web root is the git checkout — keep repo plumbing and docs private.
+    # These regex locations come FIRST: nginx takes the first regex that
+    # matches, and the cache block below would otherwise claim /.git/x.js.
+    # The dotfile deny excludes /.well-known, where certbot serves its HTTP-01
+    # challenge; the bare `location ~ /\.` form breaks issuance and renewal.
+    location ~ /\.(?!well-known) { deny all; return 404; }
+    location ~* \.md$ { deny all; }
+
+    # Always revalidate the entry page, so a deploy (git reset to origin/main)
+    # is live on the next visit rather than after a cache expiry nobody can
+    # see. "/" internally redirects here via the index directive and picks up
+    # these headers.
+    location = /index.html {
+        include snippets/lab980-security-headers.conf;
+        add_header Cache-Control "no-cache" always;
+    }
+
+    # This site is unhashed ES modules loaded by two pages (index.html and
+    # output.html). Without revalidation a browser can pair a fresh index.html
+    # with a heuristically cached js/main.js from the previous deploy, so every
+    # page, script and stylesheet revalidates too. ETag makes that a 304.
+    location ~* \.(?:html|js|css)$ {
+        include snippets/lab980-security-headers.conf;
+        add_header Cache-Control "no-cache" always;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+}
