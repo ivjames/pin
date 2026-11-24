@@ -7,7 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23121317'/%3E%3Cpath d='M6 9l20-3-3 20-15-4z' fill='%23ffb020'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="css/app.css">
 </head>
-<body>
+<body data-rail="left" data-lists="right">
 <header id="bar">
   <strong class="brand">Cornerpin</strong>
   <input id="projName" class="name" type="text" aria-label="Project name" spellcheck="false">
@@ -61,6 +61,7 @@
     <span class="lbl">Editing</span>
     <button id="tgtQuad" class="tgt quad" data-target="quad" title="Quad: the 4 corners the content is warped to (Q)">Quad <small>content corners</small></button>
     <button id="tgtMask" class="tgt mask" data-target="mask" title="Mask: the outline that decides what part is visible (M)">Mask <small>visible area</small></button>
+    <button id="tgtXform" class="tgt xform" data-target="transform" title="Transform: move, scale and rotate the whole shape (T)">Transform <small>move, scale, rotate</small></button>
     <span id="linkState" class="state"></span>
   </div>
   <div id="toolHint" hidden></div>
@@ -90,7 +91,7 @@
 </aside>
 
 <footer id="status">
-  <span id="hint">Drag handles to align. Hold Cmd to skip snapping, Option to move one corner of a shared set. Arrows nudge 1 px (Shift: 10). Pinch or Ctrl+scroll zooms the canvas; two-finger scroll pans.</span>
+  <span id="hint">Drag handles to align. Cmd skips snapping, Option moves one corner of a shared set. Arrows nudge 1 px (Shift: 10). In Transform, corners scale in proportion (Shift: freely). Pinch zooms the canvas; two-finger scroll pans.</span>
   <span class="grow"></span>
   <span id="msg"></span>
   <span id="storage"></span>

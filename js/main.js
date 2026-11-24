@@ -7,7 +7,7 @@
 // mask, or adding or deleting a mask point, separates them; the quad then lives in shape.frame.
 
 import { Renderer, SHADERS, effectiveFrame, isLinked } from './renderer.js';
-import { pointInPoly, closestOnSegment, bboxFrame, snapPoint, bbox } from './geometry.js';
+import { pointInPoly, closestOnSegment, bboxFrame, snapPoint } from './geometry.js';
 import { newProject, newShape, quadShape, boxShapes, presetShape, PRESETS, sanitize, History, autosave, loadSaved, uid } from './state.js';
 import { parseSVG, fitRings } from './svgimport.js';
 import { media, loadAll, importFiles, remove as removeMedia, findByName, setPlaying, restartAll } from './media.js';
@@ -27,7 +27,7 @@ const app = {
   project: newProject(),
   history: new History(),
   sel: { shapeId: null, handle: -1 },
-  target: 'quad',    // which outline the handles edit: 'quad' | 'mask'
+  target: 'quad',    // what the handles edit: 'quad' | 'mask' | 'transform' (the whole shape)
   tool: 'select',    // 'select' | 'add' | 'delete'
   guides: true,
   testPattern: false,
@@ -111,8 +111,8 @@ function setProject(project, { resetHistory = false } = {}) {
   if (!shapeById(app.sel.shapeId)) app.sel = { shapeId: null, handle: -1 };
   if (resetHistory) app.history.reset(project);
   renderer.setSize(project.output.w, project.output.h);
-  layout();
   refreshUI();
+  arrange();
   updateHistoryButtons();
 }
 
@@ -165,7 +165,7 @@ function writable(shape, kind) {
 function layout() {
   const sw = stage.clientWidth, sh = stage.clientHeight;
   const [W, H] = size();
-  const pad = 20, top = 56; // the top band is kept clear for the Editing bar
+  const pad = 20, top = $('#targetBar').offsetHeight + 16; // the top band is kept clear for the Editing bar
   const v = app.view;
   v.fit = Math.max(0.01, Math.min((sw - pad * 2) / W, (sh - top - pad) / H));
   v.scale = v.fit * v.zoom;
@@ -199,6 +199,55 @@ function panBy(dx, dy) {
 
 function fitView() {
   Object.assign(app.view, { zoom: 1, panX: 0, panY: 0 });
+  layout();
+}
+
+// ---------- arrangement ----------
+
+const ARRANGEMENTS = [['left', 'right'], ['top', 'right'], ['left', 'bottom'], ['top', 'bottom']];
+
+/**
+ * Place the tool rail (left of the canvas, or a strip above it) and the lists (right of the
+ * canvas, or a strip below it) so the canvas comes out as large as it can for this output shape
+ * in this window. A landscape output in a tall window gets strips above and below; a portrait
+ * output in a wide window gets panels at the sides, and so on.
+ */
+function arrange() {
+  const body = document.body, rail = $('#rail'), lists = $('#lists');
+  const [W, H] = size();
+  const current = `${body.dataset.rail}/${body.dataset.lists}`;
+  const fitOf = () => {
+    const top = $('#targetBar').offsetHeight + 16;
+    return Math.min((stage.clientWidth - 40) / W, (stage.clientHeight - top - 20) / H);
+  };
+  let best = null;
+  for (const [r, l] of ARRANGEMENTS) {
+    body.dataset.rail = r;
+    body.dataset.lists = l;
+    body.style.setProperty('--lists-w', '250px');
+    let score = fitOf();
+    // An arrangement that would push a tool out of view or squeeze the lists flat is not a candidate.
+    // scrollHeight does not report content that only spills into the padding, so compare boxes.
+    const rr = rail.getBoundingClientRect();
+    const railFits = [...rail.children].every((c) => {
+      if (c.hidden) return true;
+      const cr = c.getBoundingClientRect();
+      return cr.bottom <= rr.bottom - 3 && cr.right <= rr.right - 3;
+    });
+    const fits = railFits && lists.clientHeight >= 110 && lists.clientWidth >= 200;
+    if (!fits || !(score > 0)) score = Math.min(score, 0) - 1;
+    else if (`${r}/${l}` === current) score *= 1.04; // stay put unless another arrangement is clearly better
+    if (!best || score > best.score) best = { r, l, score };
+  }
+  body.dataset.rail = best.r;
+  body.dataset.lists = best.l;
+  // Side lists take the width the canvas cannot use, so layer names are not cut short for nothing.
+  if (best.l === 'right') {
+    const fit = fitOf();
+    const spare = stage.clientWidth - 40 - W * fit;
+    body.style.setProperty('--lists-w', Math.round(Math.max(250, Math.min(420, 250 + spare * 0.6))) + 'px');
+    if (fitOf() < fit - 1e-6) body.style.setProperty('--lists-w', '250px');
+  }
   layout();
 }
 
@@ -332,27 +381,120 @@ function deletePoint(shape, idx) {
   return true;
 }
 
-/** Resize the quad around its centre to the media's aspect ratio, as an upright rectangle. */
-function matchQuadToMedia(shape) {
-  const m = media.get(shape.content.mediaId);
-  if (!m || !m.w || !m.h) return;
+/**
+ * A shape's own frame of reference, in output pixels: rotated so the quad's top edge runs along
+ * +x. Everything that has to stay undistorted on a non-square output (aspect ratios, scaling,
+ * rotation) is done in this space, not in normalized coordinates.
+ */
+function localFrame(shape) {
   const [W, H] = size();
-  const q = outline(shape, 'quad');
-  const b = bbox(q);
+  const q = effectiveFrame(shape);
+  const a = Math.atan2((q[1][1] - q[0][1]) * H, (q[1][0] - q[0][0]) * W);
+  const cos = Math.cos(a), sin = Math.sin(a);
+  const toL = (p) => { const x = p[0] * W, y = p[1] * H; return [x * cos + y * sin, -x * sin + y * cos]; };
+  const toN = (l) => [(l[0] * cos - l[1] * sin) / W, (l[0] * sin + l[1] * cos) / H];
+  return { toL, toN };
+}
+
+function localBounds(pts, toL) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) {
+    const [x, y] = toL(p);
+    if (x < x0) x0 = x;
+    if (y < y0) y0 = y;
+    if (x > x1) x1 = x;
+    if (y > y1) y1 = y;
+  }
+  return { x0, y0, x1, y1 };
+}
+
+/**
+ * Make the quad a true rectangle with the given width/height ratio (in output pixels), keeping
+ * its centre and its current rotation, and fitting inside the space it occupied.
+ */
+function setQuadAspect(shape, ratio) {
+  if (!(ratio > 0)) return;
+  const f = localFrame(shape);
+  const b = localBounds(effectiveFrame(shape), f.toL);
   const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
-  let wPx = (b.x1 - b.x0) * W, hPx = (b.y1 - b.y0) * H;
-  const mr = shape.rot % 2 ? m.h / m.w : m.w / m.h;
-  if (wPx / hPx > mr) wPx = hPx * mr; else hPx = wPx / mr;
-  const hw = wPx / W / 2, hh = hPx / H / 2;
-  const rect = [[cx - hw, cy - hh], [cx + hw, cy - hh], [cx + hw, cy + hh], [cx - hw, cy + hh]];
+  let w = b.x1 - b.x0, hgt = b.y1 - b.y0;
+  if (!(w > 0 && hgt > 0)) return;
+  if (w / hgt > ratio) w = hgt * ratio; else hgt = w / ratio;
+  const rect = [[cx - w / 2, cy - hgt / 2], [cx + w / 2, cy - hgt / 2], [cx + w / 2, cy + hgt / 2], [cx - w / 2, cy + hgt / 2]].map(f.toN);
   if (isLinked(shape)) shape.pts = rect; else shape.frame = rect;
+}
+
+/** Width/height ratio of the shape's media as its content is currently turned, or 0. */
+function mediaRatio(shape) {
+  const m = media.get(shape.content.mediaId);
+  if (shape.content.type !== 'media' || !m || !m.w || !m.h) return 0;
+  return shape.rot % 2 ? m.h / m.w : m.w / m.h;
+}
+
+// ---------- free transform ----------
+
+const XFORM_HANDLES = [
+  { id: 'nw', fx: 0, fy: 0 }, { id: 'n', fx: 0.5, fy: 0 }, { id: 'ne', fx: 1, fy: 0 }, { id: 'e', fx: 1, fy: 0.5 },
+  { id: 'se', fx: 1, fy: 1 }, { id: 's', fx: 0.5, fy: 1 }, { id: 'sw', fx: 0, fy: 1 }, { id: 'w', fx: 0, fy: 0.5 },
+];
+
+/** The transform box of a shape: its bounds in its own frame, covering both the quad and the mask. */
+function xformBox(shape) {
+  const f = localFrame(shape);
+  const b = localBounds(shape.frame ? [...shape.pts, ...shape.frame] : shape.pts, f.toL);
+  const at = (fx, fy) => [b.x0 + (b.x1 - b.x0) * fx, b.y0 + (b.y1 - b.y0) * fy];
+  const stem = 28 / app.view.scale; // the rotate handle sits a fixed screen distance above the box
+  return { ...f, ...b, at, rot: [(b.x0 + b.x1) / 2, b.y0 - stem], centre: at(0.5, 0.5) };
+}
+
+function xformHit(shape, m) {
+  const box = xformBox(shape);
+  const scr = (l) => toScreen(box.toN(l));
+  if (dist(scr(box.rot), m) <= HIT) return 'rot';
+  for (const hd of XFORM_HANDLES) if (dist(scr(box.at(hd.fx, hd.fy)), m) <= HIT) return hd.id;
+  const l = box.toL(toNorm(m[0], m[1]));
+  return l[0] >= box.x0 && l[0] <= box.x1 && l[1] >= box.y0 && l[1] <= box.y1 ? 'body' : null;
+}
+
+/** Apply a scale or rotate drag. `d` holds the box and the points as they were at pointerdown. */
+function applyXform(d, n, free, snapAngle) {
+  const box = d.box;
+  const pl = box.toL(n);
+  let map;
+  if (d.handle === 'rot') {
+    const [cx, cy] = box.centre;
+    let ang = Math.atan2(pl[1] - cy, pl[0] - cx) - Math.atan2(d.startL[1] - cy, d.startL[0] - cx);
+    if (snapAngle) ang = Math.round(ang / (Math.PI / 12)) * (Math.PI / 12);
+    const cos = Math.cos(ang), sin = Math.sin(ang);
+    map = (l) => [cx + (l[0] - cx) * cos - (l[1] - cy) * sin, cy + (l[0] - cx) * sin + (l[1] - cy) * cos];
+  } else {
+    const hd = XFORM_HANDLES.find((x) => x.id === d.handle);
+    const anchor = box.at(1 - hd.fx, 1 - hd.fy), grab = box.at(hd.fx, hd.fy);
+    const vx = grab[0] - anchor[0], vy = grab[1] - anchor[1];
+    let sx = 1, sy = 1;
+    if (hd.fx === 0.5) sy = (pl[1] - anchor[1]) / vy;          // top or bottom side: height only
+    else if (hd.fy === 0.5) sx = (pl[0] - anchor[0]) / vx;     // left or right side: width only
+    else if (free) { sx = (pl[0] - anchor[0]) / vx; sy = (pl[1] - anchor[1]) / vy; }
+    else sx = sy = ((pl[0] - anchor[0]) * vx + (pl[1] - anchor[1]) * vy) / (vx * vx + vy * vy); // corner: in proportion
+    const floor = (v) => (isFinite(v) ? Math.max(0.02, v) : 1); // never collapse or flip the shape
+    sx = floor(sx);
+    sy = floor(sy);
+    map = (l) => [anchor[0] + (l[0] - anchor[0]) * sx, anchor[1] + (l[1] - anchor[1]) * sy];
+  }
+  const run = (pts) => pts.map((p) => clampPt(box.toN(map(box.toL(p)))));
+  d.shape.pts = run(d.pts);
+  if (d.frame) d.shape.frame = run(d.frame);
 }
 
 // ---------- pointer interaction ----------
 
 function hitTest(m) {
   const sel = selected();
-  if (sel && sel.visible) {
+  if (sel && sel.visible && app.target === 'transform') {
+    const part = xformHit(sel, m);
+    if (part && part !== 'body') return { type: 'xform', shape: sel, handle: part };
+    if (part === 'body') return { type: 'body', shape: sel };
+  } else if (sel && sel.visible) {
     const pts = outline(sel, app.target);
     let best = -1, bestD = HIT;
     pts.forEach((p, i) => { const d = dist(toScreen(p), m); if (d <= bestD) { bestD = d; best = i; } });
@@ -405,7 +547,13 @@ overlay.addEventListener('pointerdown', (e) => {
   capture(e);
   // Snapshot for abandonDrag: a touch drag can turn into a pinch after it has already moved things.
   const before = JSON.stringify(app.project.shapes);
-  if (hit.type === 'handle') {
+  if (hit.type === 'xform') {
+    const box = xformBox(hit.shape);
+    app.drag = {
+      type: 'xform', shape: hit.shape, handle: hit.handle, box, startL: box.toL(toNorm(m[0], m[1])), moved: false, before,
+      pts: copyPts(hit.shape.pts), frame: hit.shape.frame ? copyPts(hit.shape.frame) : null,
+    };
+  } else if (hit.type === 'handle') {
     const kind = app.target;
     // Shared corners move together only for quads; a mask point is always moved on its own.
     const welded = e.altKey || kind === 'mask' ? [] : weldedWith(hit.shape, kind, hit.idx);
@@ -438,7 +586,7 @@ overlay.addEventListener('pointermove', (e) => {
   if (!d) {
     if (app.tool !== 'select') { overlay.style.cursor = 'crosshair'; return; }
     const hit = app.busy ? null : hitTest(m);
-    overlay.style.cursor = !hit ? 'default' : hit.type === 'body' ? 'move' : 'crosshair';
+    overlay.style.cursor = !hit ? 'default' : hit.type === 'body' ? 'move' : hit.type === 'xform' ? (hit.handle === 'rot' ? 'grab' : 'nwse-resize') : 'crosshair';
     return;
   }
   if (d.type === 'pan') {
@@ -452,7 +600,10 @@ overlay.addEventListener('pointermove', (e) => {
   let n = clampPt(toNorm(m[0], m[1]));
   app.snapMark = null;
 
-  if (d.type === 'handle') {
+  if (d.type === 'xform') {
+    applyXform(d, toNorm(m[0], m[1]), e.shiftKey, e.shiftKey);
+    d.moved = true;
+  } else if (d.type === 'handle') {
     if (useSnap) {
       const moving = new Set(d.welded.map((w) => w.shape.id + ':' + w.idx));
       const linked = isLinked(d.shape);
@@ -617,6 +768,7 @@ window.addEventListener('keydown', (e) => {
   else if (lower === 'd') setTool(app.tool === 'delete' ? 'select' : 'delete');
   else if (lower === 'q') setTarget('quad');
   else if (lower === 'm') setTarget('mask');
+  else if (lower === 't') setTarget('transform');
   else if (key === '0') fitView();
   else if (key === '=' || key === '+') zoomAt(1.25);
   else if (key === '-') zoomAt(0.8);
@@ -653,7 +805,7 @@ function drawOverlay() {
 
   if (sel && sel.visible) {
     const linked = isLinked(sel);
-    const active = app.target;
+    const active = app.target === 'transform' ? null : app.target;
     const draw = (kind) => {
       const pts = outline(sel, kind);
       const color = kind === 'quad' ? QUAD : MASK;
@@ -685,8 +837,39 @@ function drawOverlay() {
       });
     };
     // Inactive outline first so the active one sits on top. A linked shape has one outline.
-    if (linked) draw(active);
+    if (!active) { draw('quad'); if (!linked) draw('mask'); }
+    else if (linked) draw(active);
     else { draw(active === 'quad' ? 'mask' : 'quad'); draw(active); }
+
+    if (!active) {
+      // Transform box: corners scale, sides stretch one way, the round handle on the stem rotates.
+      const box = xformBox(sel);
+      const scr = (l) => toScreen(box.toN(l));
+      const corners = [box.at(0, 0), box.at(1, 0), box.at(1, 1), box.at(0, 1)].map(scr);
+      octx.beginPath();
+      corners.forEach(([x, y], i) => (i ? octx.lineTo(x, y) : octx.moveTo(x, y)));
+      octx.closePath();
+      octx.lineWidth = 1.5;
+      octx.strokeStyle = '#ecedf2';
+      octx.stroke();
+      const top = scr(box.at(0.5, 0)), rot = scr(box.rot);
+      octx.beginPath();
+      octx.moveTo(top[0], top[1]);
+      octx.lineTo(rot[0], rot[1]);
+      octx.stroke();
+      octx.fillStyle = '#15161a';
+      octx.lineWidth = 2;
+      for (const hd of XFORM_HANDLES) {
+        const [x, y] = scr(box.at(hd.fx, hd.fy));
+        const r = hd.fx === 0.5 || hd.fy === 0.5 ? 4.5 : 6;
+        octx.fillRect(x - r, y - r, r * 2, r * 2);
+        octx.strokeRect(x - r, y - r, r * 2, r * 2);
+      }
+      octx.beginPath();
+      octx.arc(rot[0], rot[1], 6.5, 0, Math.PI * 2);
+      octx.fill();
+      octx.stroke();
+    }
 
     // Mark the content's top-left corner so Rotate and Flip are predictable.
     const q = outline(sel, 'quad');
@@ -762,8 +945,8 @@ function drawOutputGuides(ctx, W, H) {
     ctx.stroke();
   }
   if (!sel || !sel.visible) return;
-  const color = app.target === 'quad' ? QUAD : MASK;
-  const pts = outline(sel, app.target);
+  const color = app.target === 'quad' ? QUAD : app.target === 'mask' ? MASK : '#ecedf2';
+  const pts = outline(sel, app.target === 'transform' ? 'mask' : app.target);
   tracePoly(ctx, pts, px);
   ctx.lineWidth = 2 * unit;
   ctx.strokeStyle = color;
@@ -910,7 +1093,9 @@ function renderTools() {
   }
   const s = selected();
   $('#targetBar').classList.toggle('off', !s);
-  $('#linkState').textContent = !s ? 'Select a shape' : isLinked(s) ? 'Mask follows the quad' : `Mask: ${s.pts.length} points, separate from the quad`;
+  $('#linkState').textContent = !s ? 'Select a shape'
+    : app.target === 'transform' ? 'Corners scale in proportion (Shift: freely). Sides stretch. Top handle rotates (Shift: 15\u00b0 steps).'
+    : isLinked(s) ? 'Mask follows the quad' : `Mask: ${s.pts.length} points, separate from the quad`;
   const hint = $('#toolHint');
   hint.hidden = app.tool === 'select';
   hint.classList.toggle('del', app.tool === 'delete');
@@ -1019,10 +1204,22 @@ function renderInspector() {
       !m ? h('option', { value: '', selected: true }, c.mediaName ? `Missing: ${c.mediaName}` : 'None imported yet') : null,
       items.map((it) => opt(it.id, it.name, c.mediaId)))));
     box.append(grp('Fit', h('select', { title: 'How the media fills the quad', onchange: done((t) => { s.fit = t.value; }) },
-      opt('fill', 'Stretch to the quad', s.fit), opt('cover', 'Cover (crop, no distortion)', s.fit), opt('contain', 'Contain (bars, no distortion)', s.fit)),
-      h('button', { disabled: !m || !!m.error, title: 'Reshape the quad to an upright rectangle with the media’s aspect ratio',
-        onclick: () => { matchQuadToMedia(s); commit(); } }, 'Match quad to media')));
+      opt('fill', 'Stretch to the quad', s.fit), opt('cover', 'Cover (crop, no distortion)', s.fit), opt('contain', 'Contain (bars, no distortion)', s.fit))));
   }
+
+  const mr = mediaRatio(s);
+  const [OW, OH] = size();
+  const ratios = [['1', 'Square 1:1'], [String(4 / 3), '4:3'], [String(3 / 2), '3:2'], [String(16 / 9), '16:9'],
+    [String(3 / 4), '3:4 portrait'], [String(2 / 3), '2:3 portrait'], [String(9 / 16), '9:16 portrait'], [String(OW / OH), `Same as output (${OW} x ${OH})`]];
+  if (mr) ratios.push([String(mr), 'Same as media']);
+  box.append(grp('Quad',
+    h('select', { id: 'quadAspect', title: 'Make the quad a true rectangle with this shape. It keeps its centre and rotation.', onchange: (e) => {
+      const r = Number(e.target.value);
+      e.target.value = '';
+      if (r > 0) { setQuadAspect(s, r); app.sel.handle = -1; commit(); }
+    } }, h('option', { value: '', selected: true }, 'Set shape…'), ratios.map(([v, label]) => h('option', { value: v }, label))),
+    h('button', { class: app.target === 'transform' ? 'on' : '', title: 'Move, scale and rotate the whole shape (T)',
+      onclick: () => setTarget(app.target === 'transform' ? 'quad' : 'transform') }, 'Transform')));
 
   box.append(grp('Turn',
     h('button', { onclick: () => { s.rot = (s.rot + 1) % 4; commit(); }, title: 'Rotate content 90 degrees' }, 'Rotate'),
@@ -1169,7 +1366,8 @@ function setOutputSize(w, hh) {
   if (!isFinite(w) || !isFinite(hh)) return;
   const { w: W0, h: H0 } = app.project.output;
   if (w === W0 && hh === H0) return;
-  const k = Math.min(w / W0, hh / H0);
+  // Scale by the shorter side, so swapping width and height (Rotate) and swapping back is lossless.
+  const k = Math.min(w, hh) / Math.min(W0, H0);
   const remap = (p) => [0.5 + ((p[0] - 0.5) * W0 * k) / w, 0.5 + ((p[1] - 0.5) * H0 * k) / hh];
   for (const s of app.project.shapes) {
     s.pts = s.pts.map(remap);
@@ -1177,8 +1375,8 @@ function setOutputSize(w, hh) {
   }
   app.project.output = { w, h: hh };
   renderer.setSize(w, hh);
-  layout();
   commit();
+  arrange();
 }
 
 // ---------- export dialog ----------
@@ -1429,6 +1627,11 @@ function wire() {
   };
 
   new ResizeObserver(layout).observe(stage);
+  // The inspector and top bar wrap, so their height changes with the selection and the window.
+  let arranging = 0;
+  const rearrange = () => { cancelAnimationFrame(arranging); arranging = requestAnimationFrame(arrange); };
+  window.addEventListener('resize', rearrange);
+  new ResizeObserver(rearrange).observe($('#inspector'));
   window.addEventListener('beforeunload', () => { try { app.outWin?.close(); } catch (_) { /* ignore */ } });
 }
 
