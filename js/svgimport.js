@@ -108,10 +108,16 @@ function ringArea(pts) {
   return Math.abs(a) / 2;
 }
 
-function fillColor(el) {
+function ownFill(el) {
   const style = el.getAttribute('style') || '';
   const m = /(?:^|;)\s*fill\s*:\s*([^;]+)/i.exec(style);
-  const raw = (m ? m[1] : el.getAttribute('fill') || '').trim();
+  return (m ? m[1] : el.getAttribute('fill') || '').trim();
+}
+
+/** The fill in effect for an element: its own, or the nearest ancestor's. Only hex colours are used. */
+function fillColor(el) {
+  let raw = '';
+  for (let n = el; n && n.nodeType === 1 && !raw; n = n.parentNode) raw = ownFill(n);
   let h = /^#([0-9a-f]{3})$/i.exec(raw);
   if (h) return '#' + h[1].split('').map((c) => c + c).join('').toLowerCase();
   h = /^#([0-9a-f]{6})$/i.exec(raw);
@@ -125,7 +131,16 @@ function pathDataFor(el, tag) {
   if (tag === 'path') return splitSubpaths(el.getAttribute('d') || '');
   if (tag === 'rect') {
     const x = num(el, 'x'), y = num(el, 'y'), w = num(el, 'width'), h = num(el, 'height');
-    return w > 0 && h > 0 ? [`M ${x} ${y} H ${x + w} V ${y + h} H ${x} Z`] : [];
+    if (!(w > 0 && h > 0)) return [];
+    // Corner radii follow the SVG rules: a missing one takes the other's value, each is capped at half the side.
+    const has = (name) => el.hasAttribute(name) && isFinite(parseFloat(el.getAttribute(name)));
+    let rx = has('rx') ? num(el, 'rx') : has('ry') ? num(el, 'ry') : 0;
+    let ry = has('ry') ? num(el, 'ry') : has('rx') ? num(el, 'rx') : 0;
+    rx = Math.max(0, Math.min(rx, w / 2));
+    ry = Math.max(0, Math.min(ry, h / 2));
+    if (!(rx > 0 && ry > 0)) return [`M ${x} ${y} H ${x + w} V ${y + h} H ${x} Z`];
+    return [`M ${x + rx} ${y} H ${x + w - rx} A ${rx} ${ry} 0 0 1 ${x + w} ${y + ry} V ${y + h - ry} A ${rx} ${ry} 0 0 1 ${x + w - rx} ${y + h} ` +
+      `H ${x + rx} A ${rx} ${ry} 0 0 1 ${x} ${y + h - ry} V ${y + ry} A ${rx} ${ry} 0 0 1 ${x + rx} ${y} Z`];
   }
   if (tag === 'circle' || tag === 'ellipse') {
     const cx = num(el, 'cx'), cy = num(el, 'cy');
@@ -194,7 +209,9 @@ export function parseSVG(text) {
               const len = path.getTotalLength();
               if (!(len > 0)) { skipped++; return; }
               const ctm = path.getCTM() || new DOMMatrix();
-              const steps = Math.max(8, Math.min(600, Math.ceil(len / 2)));
+              // The floor does not depend on the file's units: a circle of radius 1 and one of radius
+              // 1000 both get enough samples to stay round. Longer paths get more, up to a cap.
+              const steps = Math.max(256, Math.min(1200, Math.ceil(len / 2)));
               const pts = [];
               for (let s = 0; s < steps; s++) {
                 const p = path.getPointAtLength((s / steps) * len).matrixTransform(ctm);
@@ -225,7 +242,7 @@ export function parseSVG(text) {
   const diag = Math.hypot(x1 - x0, y1 - y0) || 1;
   const rings = [];
   for (const r of raw) {
-    const pts = simplifyRing(r.pts, diag * 0.002);
+    const pts = simplifyRing(r.pts, diag * 0.0012);
     if (pts.length < 3 || ringArea(pts) < diag * diag * 1e-6) { skipped++; continue; }
     rings.push({ ...r, pts });
   }
