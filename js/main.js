@@ -378,7 +378,7 @@ overlay.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'touch') {
     touches.set(e.pointerId, m);
     if (touches.size === 2) {
-      if (app.drag) cancelDrag();
+      abandonDrag();
       const [a, b] = [...touches.values()];
       pinch = { d: dist(a, b), c: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] };
       return;
@@ -387,7 +387,7 @@ overlay.addEventListener('pointerdown', (e) => {
   if ((e.button !== 0 && e.button !== 1) || app.busy) return;
   if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
   if (e.button === 1) { // middle button drags the view
-    overlay.setPointerCapture(e.pointerId);
+    capture(e);
     app.drag = { type: 'pan', last: m, moved: false };
     e.preventDefault();
     return;
@@ -401,19 +401,19 @@ overlay.addEventListener('pointerdown', (e) => {
   }
   const hit = hitTest(m);
   if (!hit) { select(null); return; }
-  overlay.setPointerCapture(e.pointerId);
+  capture(e);
+  // Snapshot for abandonDrag: a touch drag can turn into a pinch after it has already moved things.
+  const before = JSON.stringify(app.project.shapes);
   if (hit.type === 'handle') {
     const kind = app.target;
-    // Dragging a mask point of a linked shape separates the mask from the quad first.
-    if (kind === 'mask' && isLinked(hit.shape)) unlink(hit.shape);
     // Shared corners move together only for quads; a mask point is always moved on its own.
     const welded = e.altKey || kind === 'mask' ? [] : weldedWith(hit.shape, kind, hit.idx);
     app.sel = { shapeId: hit.shape.id, handle: hit.idx };
-    app.drag = { type: 'handle', shape: hit.shape, kind, idx: hit.idx, welded, moved: false };
+    app.drag = { type: 'handle', shape: hit.shape, kind, idx: hit.idx, welded, moved: false, before };
   } else {
     if (app.sel.shapeId !== hit.shape.id || app.sel.handle !== -1) select(hit.shape.id);
     app.drag = {
-      type: 'shape', shape: hit.shape, start: toNorm(m[0], m[1]), moved: false,
+      type: 'shape', shape: hit.shape, start: toNorm(m[0], m[1]), moved: false, before,
       pts: copyPts(hit.shape.pts), frame: hit.shape.frame ? copyPts(hit.shape.frame) : null,
     };
   }
@@ -462,6 +462,9 @@ overlay.addEventListener('pointermove', (e) => {
       n = r.pt;
       if (r.snapped) app.snapMark = n;
     }
+    // Moving a mask point of a linked shape is what separates the mask from the quad. It happens
+    // here, on the first real movement, so a click that never drags leaves the shape linked.
+    if (d.kind === 'mask' && isLinked(d.shape)) unlink(d.shape);
     writable(d.shape, d.kind)[d.idx] = n;
     for (const w of d.welded) writable(w.shape, w.kind)[w.idx] = [n[0], n[1]];
     d.moved = true;
@@ -486,11 +489,20 @@ overlay.addEventListener('pointermove', (e) => {
   }
 });
 
-function cancelDrag() {
+/** Drop the drag in progress and put the shapes back as they were when it started. */
+function abandonDrag() {
   const d = app.drag;
+  if (!d) return;
   app.drag = null;
   app.snapMark = null;
-  if (d && d.moved && d.type !== 'pan') commit();
+  if (d.before && d.moved) {
+    app.project.shapes = JSON.parse(d.before);
+    refreshUI();
+  }
+}
+
+function capture(e) {
+  try { overlay.setPointerCapture(e.pointerId); } catch (_) { /* pointer already gone */ }
 }
 
 function endPointer(e) {
