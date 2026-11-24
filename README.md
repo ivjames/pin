@@ -35,8 +35,12 @@ Every shape has two outlines, and the `Editing` bar above the canvas picks which
 - **Quad** (cyan, square handles): the 4 corners the content is warped to.
 - **Mask** (amber, round handles): the outline that decides what part is visible. Any number of points.
 
-On a new shape they are the same four points, and the bar says `Mask follows the quad`. Reshaping the mask,
-or adding or deleting a mask point, separates them. `Reset mask to quad` joins them again.
+**They are locked together by default.** Moving, scaling and rotating a shape always carries both. On a
+Quad or Box the mask is the quad, so dragging a corner moves both; a preset or imported shape has only the
+Transform handles. `Edit separately` in the canvas bar unlocks the selected shape: then Quad mode moves the
+content corners on their own, Mask mode moves mask points on their own, and the Add point and Delete point
+tools work on its mask. `Reset mask to quad` joins them again. Turning `Edit separately` off locks the shape
+as it stands. A project saved before the lock existed loads with every shape locked.
 
 `Add point`: click the button, then click where the point goes. It joins the nearest mask edge.
 `Delete point`: click the button, then click the point. A mask keeps at least 3 points.
@@ -79,7 +83,7 @@ hole. To use an SVG as artwork instead, import it under Media; it is drawn as an
 - `Transform` (or T) puts a box around the whole shape. Drag inside to move. Corners scale in proportion; hold
   Shift to scale freely. Side handles stretch one way. The round handle above the box rotates; Shift snaps to
   15 degree steps. Scaling and rotating happen in output pixels, so nothing skews on a non-square output.
-- Quad and Mask modes still move single corners and points.
+- `Set shape…` reshapes the quad alone, so on a shape whose mask is not its quad it needs `Edit separately`.
 
 ## Layout
 

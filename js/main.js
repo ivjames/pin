@@ -27,7 +27,17 @@ const app = {
   project: newProject(),
   history: new History(),
   sel: { shapeId: null, handle: -1 },
-  target: 'quad',    // what the handles edit: 'quad' | 'mask' | 'transform' (the whole shape)
+  // What the handles edit: 'quad' | 'mask' | 'transform' (the whole shape). A shape keeps its quad
+  // and mask locked together unless it has been unlocked (lockQuad: false), so on a locked shape
+  // the only handles are the whole-shape transform and, where the mask is the quad, its corners.
+  // Reading it through this getter covers every user of app.target.
+  mode: 'quad',
+  get target() {
+    const s = this.project.shapes.find((x) => x.id === this.sel.shapeId);
+    if (!s || !s.lockQuad || this.mode === 'transform') return this.mode;
+    return isLinked(s) ? 'quad' : 'transform';
+  },
+  set target(v) { this.mode = v; },
   tool: 'select',    // 'select' | 'add' | 'delete'
   guides: true,
   testPattern: false,
@@ -122,6 +132,11 @@ function select(shapeId, handle = -1) {
 }
 
 function setTarget(target) {
+  const s = selected();
+  if (s && s.lockQuad && (target === 'mask' || (target === 'quad' && !isLinked(s)))) {
+    say('Quad and mask are locked together on this shape. Turn on Edit separately to change one without the other.');
+    return;
+  }
   if (app.target === target) return;
   app.target = target;
   app.sel.handle = -1;
@@ -136,6 +151,18 @@ function setTool(tool) {
 }
 
 // ---------- the two outlines ----------
+
+const SEP_HINT = 'Mask points change the mask without the quad. Select the shape and turn on Edit separately first.';
+
+function toggleSeparate() {
+  const s = selected();
+  if (!s) return;
+  s.lockQuad = !s.lockQuad;
+  app.sel.handle = -1;
+  if (s.lockQuad && app.tool !== 'select') app.tool = 'select';
+  commit();
+  say(s.lockQuad ? 'Quad and mask locked together.' : 'Quad and mask can now be edited separately (Q / M).');
+}
 
 /** The point array a handle index refers to, for the given outline. */
 function outline(shape, kind) {
@@ -298,7 +325,7 @@ function weldedWith(shape, kind, idx) {
   const p = outline(shape, kind)[idx];
   const out = [];
   for (const s of app.project.shapes) {
-    if (s === shape) continue;
+    if (s === shape || (s.lockQuad && !isLinked(s))) continue; // locked: nothing moves one outline alone
     outline(s, kind).forEach((q, i) => {
       if (Math.abs(q[0] - p[0]) < WELD && Math.abs(q[1] - p[1]) < WELD) out.push({ shape: s, kind, idx: i });
     });
@@ -358,6 +385,7 @@ function deleteTargetAt(m) {
 function addPointAt(m, snap) {
   const t = addTargetAt(m);
   if (!t) { say('Add a shape first.', true); return; }
+  if (t.shape.lockQuad) { say(SEP_HINT, true); return; }
   let n = clampPt(toNorm(m[0], m[1]));
   if (snap) {
     const [W, H] = size();
@@ -545,6 +573,7 @@ overlay.addEventListener('pointerdown', (e) => {
   if (app.tool === 'delete') {
     const t = deleteTargetAt(m);
     if (!t) { say('Click a mask point to delete it.'); return; }
+    if (t.shape.lockQuad) { say(SEP_HINT, true); return; }
     if (deletePoint(t.shape, t.idx)) { app.tool = 'select'; commit(); say('Point deleted from the mask.'); } else refreshUI();
     return;
   }
@@ -712,7 +741,11 @@ function nudge(dx, dy) {
   const [W, H] = size();
   const d = [dx / W, dy / H];
   const move = (p) => clampPt([p[0] + d[0], p[1] + d[1]]);
-  if (app.sel.handle >= 0) {
+  // A handle index is only meaningful for the outline it was picked on. Undo can restore a lock
+  // (or a different point count) under a retained selection, so the whole shape moves instead.
+  const single = app.target !== 'transform' && app.sel.handle >= 0 && app.sel.handle < outline(s, app.target).length;
+  if (!single) app.sel.handle = -1;
+  if (single) {
     if (app.target === 'mask' && isLinked(s)) unlink(s);
     const welded = app.target === 'mask' ? [] : weldedWith(s, app.target, app.sel.handle);
     const arr = writable(s, app.target);
@@ -1101,8 +1134,16 @@ function renderTools() {
   }
   const s = selected();
   $('#targetBar').classList.toggle('off', !s);
+  const locked = !!(s && s.lockQuad);
+  $('#tgtQuad').disabled = locked && !isLinked(s);
+  $('#tgtMask').disabled = locked;
+  const sep = $('#tgtSep');
+  sep.disabled = !s;
+  sep.classList.toggle('active', !!s && !locked);
+  sep.setAttribute('aria-pressed', s && !locked ? 'true' : 'false');
   $('#linkState').textContent = !s ? 'Select a shape'
     : app.target === 'transform' ? 'Corners scale in proportion (Shift: freely). Sides stretch. Top handle rotates (Shift: 15\u00b0 steps).'
+    : s.lockQuad ? (isLinked(s) ? 'Corners move the quad and its mask together' : 'Quad and mask are locked: use Transform')
     : isLinked(s) ? 'Mask follows the quad' : `Mask: ${s.pts.length} points, separate from the quad`;
   const hint = $('#toolHint');
   hint.hidden = app.tool === 'select';
@@ -1220,14 +1261,15 @@ function renderInspector() {
   const ratios = [['1', 'Square 1:1'], [String(4 / 3), '4:3'], [String(3 / 2), '3:2'], [String(16 / 9), '16:9'],
     [String(3 / 4), '3:4 portrait'], [String(2 / 3), '2:3 portrait'], [String(9 / 16), '9:16 portrait'], [String(OW / OH), `Same as output (${OW} x ${OH})`]];
   if (mr) ratios.push([String(mr), 'Same as media']);
-  box.append(grp('Quad',
-    h('select', { id: 'quadAspect', title: 'Make the quad a true rectangle with this shape. It keeps its centre and rotation.', onchange: (e) => {
+  const quadOnly = s.lockQuad && !isLinked(s); // an edit to the quad alone needs Edit separately
+  box.append(grp(quadOnly ? 'Shape' : 'Quad',
+    quadOnly ? null : h('select', { id: 'quadAspect', title: 'Make the quad a true rectangle with this shape. It keeps its centre and rotation.', onchange: (e) => {
       const r = Number(e.target.value);
       e.target.value = '';
       if (r > 0) { setQuadAspect(s, r); app.sel.handle = -1; commit(); }
     } }, h('option', { value: '', selected: true }, 'Set shape…'), ratios.map(([v, label]) => h('option', { value: v }, label))),
     h('button', { class: app.target === 'transform' ? 'on' : '', title: 'Move, scale and rotate the whole shape (T)',
-      onclick: () => setTarget(app.target === 'transform' ? 'quad' : 'transform') }, 'Transform')));
+      onclick: () => setTarget(app.target !== 'transform' ? 'transform' : quadOnly ? 'transform' : 'quad') }, 'Transform')));
 
   box.append(grp('Turn',
     h('button', { onclick: () => { s.rot = (s.rot + 1) % 4; commit(); }, title: 'Rotate content 90 degrees' }, 'Rotate'),
@@ -1244,8 +1286,8 @@ function renderInspector() {
 
   const linked = isLinked(s);
   box.append(grp('Mask',
-    h('button', { disabled: linked, title: 'Make the mask the same 4 points as the quad again', onclick: () => { relink(s); app.sel.handle = -1; commit(); } }, 'Reset mask to quad'),
-    h('button', { disabled: linked, title: 'Make the quad an upright rectangle around the mask', onclick: () => { s.frame = bboxFrame(s.pts); commit(); } }, 'Fit quad to mask')));
+    h('button', { disabled: linked || s.lockQuad, title: 'Make the mask the same 4 points as the quad again', onclick: () => { relink(s); app.sel.handle = -1; commit(); } }, 'Reset mask to quad'),
+    h('button', { disabled: linked || s.lockQuad, title: 'Make the quad an upright rectangle around the mask', onclick: () => { s.frame = bboxFrame(s.pts); commit(); } }, 'Fit quad to mask')));
 
   box.append(grp('Layer',
     h('button', { title: 'Move this layer up', disabled: idx === shapes.length - 1, onclick: () => moveLayer(s.id, 1) }, 'Up'),
@@ -1539,7 +1581,8 @@ function wire() {
   for (const b of document.querySelectorAll('#rail .tool')) {
     b.onclick = () => setTool(app.tool === b.dataset.tool ? 'select' : b.dataset.tool);
   }
-  for (const b of document.querySelectorAll('#targetBar .tgt')) b.onclick = () => setTarget(b.dataset.target);
+  for (const b of document.querySelectorAll('#targetBar .tgt[data-target]')) b.onclick = () => setTarget(b.dataset.target);
+  $('#tgtSep').onclick = toggleSeparate;
   $('#zoomIn').onclick = () => zoomAt(1.25);
   $('#zoomOut').onclick = () => zoomAt(0.8);
   $('#zoomFit').onclick = fitView;
