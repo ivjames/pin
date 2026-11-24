@@ -8,11 +8,16 @@
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body data-rail="left" data-lists="right">
+<div id="present" hidden>
+  <canvas id="presentCanvas" width="1920" height="1080"></canvas>
+  <div id="presentHint">Esc or click to return to the editor. Space plays and pauses.</div>
+</div>
 <header id="bar">
   <strong class="brand">Cornerpin</strong>
   <input id="projName" class="name" type="text" aria-label="Project name" spellcheck="false">
   <span class="sep"></span>
-  <button id="openOut" class="primary" title="Open the projector window">Open output</button>
+  <button id="openOut" class="primary" title="Show the output fullscreen on this display. Esc returns to the editor.">Open output</button>
+  <button id="openWin" title="Open the output in a second window, to drag onto a projector while the editor stays on this screen">Second window</button>
   <select id="outSize" aria-label="Output size" title="Output size in pixels. Set this to the projector's native resolution."></select>
   <span id="customSize" hidden>
     <input id="outW" type="number" min="16" max="8192" step="2" aria-label="Output width"> x

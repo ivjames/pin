@@ -19,9 +19,11 @@ droplet as root:
 ## Use
 
 1. Connect the projector over HDMI as an extended display (not mirrored).
-2. `Open output`, drag that window to the projector, click it (or press F) for fullscreen. The output size
-   switches to that display's pixel size on its own, so the projection and every export match the device.
-   If the sizes ever differ, the picture is letterboxed, never stretched.
+2. `Open output` shows the output fullscreen on the display the editor is on, with no second window. Esc or a
+   click returns to the editor; Space plays and pauses. The output size switches to that display's pixel size
+   (Undo reverts it). For a projector on an extended desktop, `Second window` opens the output in its own
+   window instead: drag it to the projector and click it (or press F) for fullscreen, and keep editing here.
+   That one needs pop-ups allowed for the site.
 3. Add a shape from the `Add` panel (Quad, Box, or a preset mask), then drag the corners until they sit on
    the real surface. `Guides` draws outlines and
    a crosshair on the projector while you align; `Test pattern` shows a grid.
