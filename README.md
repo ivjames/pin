@@ -18,12 +18,14 @@ droplet as root:
 
 ## Use
 
-1. Connect the projector over HDMI as an extended display (not mirrored).
+1. Connect the projector over HDMI. Mirrored works with `Open output`; an extended display lets you keep the
+   editor on the laptop with `Second window`.
 2. `Open output` shows the output fullscreen on the display the editor is on, with no second window. Esc or a
    click returns to the editor; Space plays and pauses. The output size switches to that display's pixel size
    (Undo reverts it). For a projector on an extended desktop, `Second window` opens the output in its own
    window instead: drag it to the projector and click it (or press F) for fullscreen, and keep editing here.
-   That one needs pop-ups allowed for the site.
+   That one needs pop-ups allowed for the site. If a display's shape ever differs from the output size, the picture
+   is letterboxed, never stretched.
 3. Add a shape from the `Add` panel (Quad, Box, or a preset mask), then drag the corners until they sit on
    the real surface. `Guides` draws outlines and
    a crosshair on the projector while you align; `Test pattern` shows a grid.
