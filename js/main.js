@@ -52,8 +52,8 @@ const app = {
   view: { ox: 0, oy: 0, scale: 1, fit: 1, zoom: 1, panX: 0, panY: 0 },
   outWin: null,
   outCtx: null,
-  outFs: false,
-  outFsSettle: 0,
+  outPop: { fs: false, settle: 0 }, // fullscreen state of the second window
+  present: null,     // in-page output: { ctx, fs, settle } while it covers the editor
 };
 window.cornerpin = app; // handy for debugging from the console
 
@@ -760,6 +760,14 @@ function nudge(dx, dy) {
 
 let nudgeTimer = null;
 window.addEventListener('keydown', (e) => {
+  if (app.present) { // the editor is covered: nothing that edits may run blind
+    if (e.metaKey || e.ctrlKey) { if (['z', 'y', 'd', 'a'].includes(e.key.toLowerCase())) e.preventDefault(); return; }
+    if (e.key === 'Escape') closeOutput();
+    else if (e.key === ' ') togglePlay();
+    else if (e.key.toLowerCase() === 'g') { app.guides = !app.guides; $('#guides').checked = app.guides; }
+    e.preventDefault();
+    return;
+  }
   const t = e.target;
   if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) {
     // Typing fields and menus keep every key; sliders, checkboxes and color wells keep only arrows and space.
@@ -1056,14 +1064,74 @@ function outputWindowPixels(w) {
   return [even(w.innerWidth * dpr), even(w.innerHeight * dpr)];
 }
 
+/**
+ * Adopt the display's pixel size once a fullscreen surface has settled, so the projection and
+ * every export match the device exactly. `st` is the surface's own { fs, settle } state.
+ */
+function followDisplay(st, fs, win) {
+  if (fs !== st.fs) {
+    st.fs = fs;
+    st.settle = fs ? 20 : 0; // let the window finish resizing before measuring it
+    if (!fs) updateOutInfo();
+  } else if (fs && st.settle > 0 && --st.settle === 0) {
+    const [W, H] = size();
+    const [tw, th] = outputWindowPixels(win);
+    if ((tw !== W || th !== H) && !app.recording && !app.drag) {
+      setOutputSize(tw, th);
+      say(`Output set to the display: ${tw} x ${th}. Undo reverts it.`);
+    }
+    updateOutInfo();
+  }
+}
+
+/** The output drawn over the editor in this page, fullscreen where the browser allows it. */
+function presentInPage() {
+  const p = app.present;
+  if (!p) return;
+  const c = $('#presentCanvas');
+  const [W, H] = size();
+  if (c.width !== W || c.height !== H || !p.ctx) {
+    c.width = W;
+    c.height = H;
+    p.ctx = c.getContext('2d', { alpha: false });
+  }
+  p.ctx.drawImage(sceneCanvas, 0, 0);
+  if (app.guides && !app.recording) drawOutputGuides(p.ctx, W, H);
+  followDisplay(p, document.fullscreenElement === $('#present'), window);
+}
+
+function openOutput() {
+  if (app.present) return;
+  const el = $('#present');
+  abandonDrag();
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+  app.present = { ctx: null, fs: false, settle: 0 };
+  el.hidden = false;
+  // Fullscreen is asked for inside the click, where it is allowed. If the browser refuses, the
+  // output still covers the whole page and Esc or a click closes it.
+  const req = el.requestFullscreen ? el.requestFullscreen({ navigationUI: 'hide' }) : Promise.reject(new Error('no fullscreen'));
+  Promise.resolve(req).catch(() => { if (app.present) $('#presentHint').textContent = 'Fullscreen was refused; the output fills the window. Esc or click to close.'; });
+}
+
+function closeOutput() {
+  if (!app.present) return;
+  app.present = null;
+  $('#present').hidden = true;
+  $('#presentHint').textContent = 'Esc or click to return to the editor. Space plays and pauses.';
+  if (document.fullscreenElement === $('#present')) document.exitFullscreen().catch(() => {});
+  updateOutInfo();
+  arrange();
+}
+
 function presentOutput() {
+  presentInPage();
   const w = app.outWin;
   if (!w) return;
   if (w.closed) {
     app.outWin = null;
     app.outCtx = null;
-    app.outFs = false;
-    $('#openOut').textContent = 'Open output';
+    app.outPop = { fs: false, settle: 0 };
+    $('#openWin').textContent = 'Second window';
     updateOutInfo();
     return;
   }
@@ -1079,32 +1147,19 @@ function presentOutput() {
     app.outCtx.drawImage(sceneCanvas, 0, 0);
     if (app.guides && !app.recording) drawOutputGuides(app.outCtx, W, H);
 
-    // When the output goes fullscreen on a display whose pixel size differs from the output size,
-    // adopt the display's size, so the projection and every export match the device exactly.
-    const fs = !!w.document.fullscreenElement;
-    if (fs !== app.outFs) {
-      app.outFs = fs;
-      app.outFsSettle = fs ? 20 : 0; // let the window finish resizing before measuring it
-      if (!fs) updateOutInfo();
-    } else if (fs && app.outFsSettle > 0 && --app.outFsSettle === 0) {
-      const [tw, th] = outputWindowPixels(w);
-      if ((tw !== W || th !== H) && !app.recording && !app.drag) {
-        setOutputSize(tw, th);
-        say(`Output set to the display: ${tw} x ${th}. Undo reverts it.`);
-      }
-      updateOutInfo();
-    }
+    followDisplay(app.outPop, !!w.document.fullscreenElement, w);
   } catch (_) { /* window still loading */ }
 }
 
-function openOutput() {
+/** A separate output window, for a projector on an extended desktop while the editor stays here. */
+function openOutputWindow() {
   if (app.outWin && !app.outWin.closed) { app.outWin.focus(); return; }
   const w = window.open('output.html', 'cornerpin-output', 'popup=yes,width=960,height=540');
-  if (!w) { say('The browser blocked the output window. Allow pop-ups for this site.', true); return; }
+  if (!w) { say('The browser blocked the second window. Allow pop-ups for this site, or use Open output, which needs none.', true); return; }
   app.outWin = w;
   app.outCtx = null;
-  app.outFs = false;
-  $('#openOut').textContent = 'Focus output';
+  app.outPop = { fs: false, settle: 0 };
+  $('#openWin').textContent = 'Focus window';
 }
 
 function togglePlay() {
@@ -1378,7 +1433,7 @@ function syncSizeUI() {
   const { w, h: hh } = app.project.output;
   if (!sel.options.length) {
     for (const [a, b] of SIZES) sel.append(h('option', { value: `${a}x${b}` }, `${a} x ${b}${b > a ? ' portrait' : ''}`));
-    sel.append(h('option', { value: 'match' }, 'Match output window'));
+    sel.append(h('option', { value: 'match' }, 'Match the display'));
     sel.append(h('option', { value: 'custom' }, 'Custom'));
   }
   const preset = SIZES.some(([a, b]) => a === w && b === hh);
@@ -1590,6 +1645,9 @@ function wire() {
   $('#undo').onclick = () => stepHistory(app.history.undo());
   $('#redo').onclick = () => stepHistory(app.history.redo());
   $('#openOut').onclick = openOutput;
+  $('#openWin').onclick = openOutputWindow;
+  $('#present').onclick = closeOutput;
+  document.addEventListener('fullscreenchange', () => { if (app.present && app.present.fs && !document.fullscreenElement) closeOutput(); });
   $('#guides').onchange = (e) => { app.guides = e.target.checked; };
   $('#testPattern').onchange = (e) => { app.testPattern = e.target.checked; };
   $('#playPause').onclick = togglePlay;
@@ -1610,9 +1668,10 @@ function wire() {
     if (v === 'custom') { $('#customSize').hidden = false; $('#outW').focus(); return; }
     e.target.blur();
     if (v === 'match') {
+      // The second window's size if it is open, otherwise the display this page is on.
       const w = app.outWin;
-      if (!w || w.closed) { say('Open the output window first, then choose this again.', true); syncSizeUI(); return; }
-      const [tw, th] = outputWindowPixels(w);
+      const dpr = window.devicePixelRatio || 1;
+      const [tw, th] = w && !w.closed ? outputWindowPixels(w) : [even(screen.width * dpr), even(screen.height * dpr)];
       setOutputSize(tw, th);
       syncSizeUI();
       say(`Output set to ${app.project.output.w} x ${app.project.output.h}.`);

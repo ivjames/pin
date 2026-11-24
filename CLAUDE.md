@@ -59,11 +59,14 @@ as a phantom second build.)
   (`VideoEncoder`), which needs a secure context; over plain HTTP the export
   and persistent storage do not work. Real-time recording (MediaRecorder) is
   the fallback. No other browser is supported or tested.
-- **Two pages, one renderer.** `index.html` is the editor; `output.html` is
-  the projector window, opened by the editor with `window.open`. The editor
-  draws into the output window's canvas directly, so `output.html` does
-  nothing useful when opened on its own, and a pop-up blocker stops the
-  output from opening at all.
+- **Two outputs, one renderer.** `Open output` is in-page: `#present` in
+  `index.html` covers the editor and asks for fullscreen inside the click
+  (`openOutput()` / `closeOutput()`); if fullscreen is refused it still fills
+  the window. While it is up the key handler runs only Esc, Space and G, so
+  nothing edits blind. `Second window` is the older path: `output.html`,
+  opened with `window.open`, which the editor draws into directly, so that
+  page does nothing useful on its own and a pop-up blocker stops it. Both are
+  fed from `presentOutput()` each frame.
 - **The vhost template is not the unmodified scaffold.** It revalidates every
   `.html`, `.js` and `.css` (unhashed ES modules; a stale `js/main.js` beside
   a fresh `index.html` is the failure it prevents), and its dotfile deny is
@@ -129,5 +132,6 @@ as a phantom second build.)
   fullscreen, the editor reads its pixel size and adopts it (undoable).
   `output.html` letterboxes with `object-fit: contain`, so a mismatch shows
   bars and never distortion. In tests fullscreen is simulated by defining
-  `document.fullscreenElement` on the output page; a real fullscreen
+  `document.fullscreenElement` on the output page. The in-page output's
+  fullscreen is real in headless Chrome; a real second-window fullscreen
   transition has not been exercised.
