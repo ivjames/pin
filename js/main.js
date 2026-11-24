@@ -481,9 +481,15 @@ function applyXform(d, n, free, snapAngle) {
     sy = floor(sy);
     map = (l) => [anchor[0] + (l[0] - anchor[0]) * sx, anchor[1] + (l[1] - anchor[1]) * sy];
   }
-  const run = (pts) => pts.map((p) => clampPt(box.toN(map(box.toL(p)))));
-  d.shape.pts = run(d.pts);
-  if (d.frame) d.shape.frame = run(d.frame);
+  // The transform is applied to every point or to none. Clamping points one by one would bend a
+  // rectangle that reaches past the working area, so a step that leaves it is simply not taken.
+  const run = (pts) => pts.map((p) => box.toN(map(box.toL(p))));
+  const pts = run(d.pts), frame = d.frame ? run(d.frame) : null;
+  const sane = (p) => isFinite(p[0]) && isFinite(p[1]) && Math.abs(p[0] - 0.5) <= 4 && Math.abs(p[1] - 0.5) <= 4;
+  if (!pts.every(sane) || (frame && !frame.every(sane))) return false;
+  d.shape.pts = pts;
+  if (frame) d.shape.frame = frame;
+  return true;
 }
 
 // ---------- pointer interaction ----------
@@ -549,9 +555,12 @@ overlay.addEventListener('pointerdown', (e) => {
   const before = JSON.stringify(app.project.shapes);
   if (hit.type === 'xform') {
     const box = xformBox(hit.shape);
+    // A shape whose mask is not 4 points can still have frame: null (its quad is then the mask's
+    // bounding rectangle, recomputed each frame). Transforming only the mask would leave that
+    // rectangle upright, so the quad is snapshotted here and written back with the first movement.
     app.drag = {
       type: 'xform', shape: hit.shape, handle: hit.handle, box, startL: box.toL(toNorm(m[0], m[1])), moved: false, before,
-      pts: copyPts(hit.shape.pts), frame: hit.shape.frame ? copyPts(hit.shape.frame) : null,
+      pts: copyPts(hit.shape.pts), frame: isLinked(hit.shape) ? null : copyPts(effectiveFrame(hit.shape)),
     };
   } else if (hit.type === 'handle') {
     const kind = app.target;
@@ -601,8 +610,7 @@ overlay.addEventListener('pointermove', (e) => {
   app.snapMark = null;
 
   if (d.type === 'xform') {
-    applyXform(d, toNorm(m[0], m[1]), e.shiftKey, e.shiftKey);
-    d.moved = true;
+    if (applyXform(d, toNorm(m[0], m[1]), e.shiftKey, e.shiftKey)) d.moved = true;
   } else if (d.type === 'handle') {
     if (useSnap) {
       const moving = new Set(d.welded.map((w) => w.shape.id + ':' + w.idx));
