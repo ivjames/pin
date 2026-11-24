@@ -25,6 +25,7 @@ export function newShape(pts, name) {
     visible: true,
     pts: pts.map((p) => [p[0], p[1]]),
     frame: null, // the content quad's 4 corners; null on a 4-point shape = the mask follows the quad
+    lockQuad: true, // quad and mask move, scale and rotate as one until the shape is unlocked (Edit separately)
     content: { type: 'solid', color, color2: '#101020', gradType: 'linear', angle: 0, shader: 'plasma', speed: 1, scale: 1, mediaId: null, mediaName: null },
     fit: 'fill',
     rot: 0,
@@ -102,6 +103,7 @@ export function sanitize(raw) {
     shape.visible = s.visible !== false;
     const frame = (Array.isArray(s.frame) ? s.frame : []).map(pt).filter(Boolean);
     shape.frame = frame.length === 4 ? frame : null;
+    shape.lockQuad = s.lockQuad !== false; // saved before the lock existed: locked, like a new shape
     const c = s.content || {};
     shape.content = {
       type: ['solid', 'gradient', 'shader', 'media'].includes(c.type) ? c.type : 'solid',

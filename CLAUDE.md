@@ -90,6 +90,14 @@ as a phantom second build.)
   places that should decide which array a handle writes to. Projects saved by
   v1 load unchanged; the reverse is not true once a 4-point mask has its own
   quad, because v1 dropped `frame` on 4-point shapes.
+- **Quad and mask are locked together unless the shape is unlocked.**
+  `lockQuad` is true on every new shape and on any saved shape that lacks the
+  field; `Edit separately` (`toggleSeparate()`) flips it. While it is true
+  nothing may write to one outline alone: `app.target` is a getter that turns
+  `quad`/`mask` into `transform` (or into `quad` where the mask is the quad),
+  `setTarget()`, the point tools and `weldedWith()` refuse, and the inspector
+  hides or disables the quad-only controls. A new control that edits the quad
+  or the mask by itself has to honour the flag the same way.
 - **No control may be scrolled out of view.** `#bar`, `#inspector` and `#rail`
   must never get `overflow: auto` or a fixed height: the first two wrap and
   take their height from the canvas row, the rail is sized to fit. The only
