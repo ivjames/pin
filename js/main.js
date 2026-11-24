@@ -741,7 +741,11 @@ function nudge(dx, dy) {
   const [W, H] = size();
   const d = [dx / W, dy / H];
   const move = (p) => clampPt([p[0] + d[0], p[1] + d[1]]);
-  if (app.sel.handle >= 0) {
+  // A handle index is only meaningful for the outline it was picked on. Undo can restore a lock
+  // (or a different point count) under a retained selection, so the whole shape moves instead.
+  const single = app.target !== 'transform' && app.sel.handle >= 0 && app.sel.handle < outline(s, app.target).length;
+  if (!single) app.sel.handle = -1;
+  if (single) {
     if (app.target === 'mask' && isLinked(s)) unlink(s);
     const welded = app.target === 'mask' ? [] : weldedWith(s, app.target, app.sel.handle);
     const arr = writable(s, app.target);
