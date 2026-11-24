@@ -29,16 +29,29 @@
   <button id="newProj" title="Clear all shapes (undoable)">New</button>
 </header>
 
+<section id="inspector" aria-label="Selected shape"></section>
+
 <nav id="rail" aria-label="Tools">
-  <button id="addQuad" class="big add" title="Add a 4-corner surface"><span class="ico">+</span>Quad</button>
-  <button id="addBox" class="big add" title="Add three quads with shared corners"><span class="ico">+</span>Box</button>
-  <hr>
-  <button id="toolSelect" class="big tool" data-tool="select" title="Select and move (V or Esc)">Select</button>
-  <button id="toolAdd" class="big tool" data-tool="add" title="Add a mask point: click this, then click where the point goes (A)">Add point</button>
-  <button id="toolDel" class="big tool" data-tool="delete" title="Delete a mask point: click this, then click the point (D)">Delete point</button>
-  <hr>
-  <button id="undo" class="big" title="Undo (Cmd+Z)">Undo</button>
-  <button id="redo" class="big" title="Redo (Shift+Cmd+Z)">Redo</button>
+  <div class="rlabel">Add</div>
+  <div id="shapeGrid">
+    <button class="shape" data-add="quad" title="Quad: a 4-corner surface"></button>
+    <button class="shape" data-add="box" title="Box: three quads with shared corners"></button>
+    <button class="shape" data-add="triangle" title="Triangle mask"></button>
+    <button class="shape" data-add="circle" title="Circle mask"></button>
+    <button class="shape" data-add="hexagon" title="Hexagon mask"></button>
+    <button class="shape" data-add="star" title="Star mask"></button>
+    <button class="shape" data-add="arrow" title="Arrow mask"></button>
+    <button class="shape" id="addSVG" title="Import shapes from an SVG file: every closed path becomes a mask"></button>
+  </div>
+  <input id="svgInput" type="file" accept=".svg,image/svg+xml" hidden>
+  <div class="rlabel">Tool</div>
+  <button id="toolSelect" class="tool" data-tool="select" title="Select and move (V or Esc)">Select</button>
+  <button id="toolAdd" class="tool" data-tool="add" title="Add a mask point: click this, then click where the point goes (A)">Add point</button>
+  <button id="toolDel" class="tool" data-tool="delete" title="Delete a mask point: click this, then click the point (D)">Delete point</button>
+  <div class="two">
+    <button id="undo" title="Undo (Cmd+Z)">Undo</button>
+    <button id="redo" title="Redo (Shift+Cmd+Z)">Redo</button>
+  </div>
 </nav>
 
 <section id="stage">
@@ -58,25 +71,21 @@
     <span id="zoomPct">100%</span>
   </div>
   <div id="empty" hidden>
-    <p>Add a surface to start mapping.</p>
+    <p>Add a surface to start mapping. More shapes are in the Add panel on the left.</p>
     <button id="emptyQuad" class="primary huge">+ Quad</button>
     <button id="emptyBox" class="primary huge">+ Box</button>
   </div>
 </section>
 
-<aside id="dock">
-  <section id="dockLayers">
+<aside id="lists">
+  <section id="listLayers">
     <h2>Layers</h2>
     <div id="layers" class="scroll"></div>
   </section>
-  <section id="dockShape">
-    <h2>Shape</h2>
-    <div id="props" class="scroll"></div>
-  </section>
-  <section id="dockMedia">
+  <section id="listMedia">
     <h2>Media <button id="importMedia" class="small">Import</button></h2>
     <div id="mediaList" class="scroll"></div>
-    <input id="fileInput" type="file" accept="video/*,image/*" multiple hidden>
+    <input id="fileInput" type="file" accept="video/*,image/*,.svg" multiple hidden>
   </section>
 </aside>
 
