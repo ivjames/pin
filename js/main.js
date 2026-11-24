@@ -1,23 +1,33 @@
 // Cornerpin editor: wiring between the model, the WebGL renderer, the editing overlay and the UI.
+//
+// Every shape has two outlines:
+//   quad - the 4 corners its content is warped to (cyan, square handles)
+//   mask - the N-point outline that decides what part is visible (amber, round handles)
+// On a fresh quad they are the same four points ("linked": shape.frame is null). Reshaping the
+// mask, or adding or deleting a mask point, separates them; the quad then lives in shape.frame.
 
-import { Renderer, SHADERS, effectiveFrame } from './renderer.js';
-import { pointInPoly, closestOnSegment, bboxFrame, snapPoint } from './geometry.js';
+import { Renderer, SHADERS, effectiveFrame, isLinked } from './renderer.js';
+import { pointInPoly, closestOnSegment, bboxFrame, snapPoint, bbox } from './geometry.js';
 import { newProject, quadShape, boxShapes, sanitize, History, autosave, loadSaved, uid } from './state.js';
 import { media, loadAll, importFiles, remove as removeMedia, findByName, setPlaying, restartAll } from './media.js';
 import { requestPersistence, storageEstimate } from './store.js';
 import * as ex from './exporter.js';
 
 const $ = (sel) => document.querySelector(sel);
-const HIT = 10;      // px radius for grabbing a point
+const HIT = 11;      // px radius for grabbing a handle
 const SNAP = 10;     // px radius for snapping
-const WELD = 1e-6;   // points closer than this (normalized) move together
+const WELD = 1e-6;   // handles closer than this (normalized) move together
 const LIMIT = [-0.5, 1.5];
+const ZOOM = [0.25, 16];
+const QUAD = '#00d1ff';
+const MASK = '#ffb020';
 
 const app = {
   project: newProject(),
   history: new History(),
-  sel: { shapeId: null, point: -1, frame: -1 },
-  editFrame: false,
+  sel: { shapeId: null, handle: -1 },
+  target: 'quad',    // which outline the handles edit: 'quad' | 'mask'
+  tool: 'select',    // 'select' | 'add' | 'delete'
   guides: true,
   testPattern: false,
   playing: true,
@@ -26,13 +36,17 @@ const app = {
   busy: false,       // true while an offline export owns the renderer
   recording: false,
   drag: null,
+  hover: null,       // last pointer position over the stage, in stage px
   snapMark: null,
-  view: { ox: 0, oy: 0, scale: 1 },
+  view: { ox: 0, oy: 0, scale: 1, fit: 1, zoom: 1, panX: 0, panY: 0 },
   outWin: null,
   outCtx: null,
+  outFs: false,
+  outFsSettle: 0,
 };
 window.cornerpin = app; // handy for debugging from the console
 
+const stage = $('#stage');
 const sceneCanvas = $('#scene');
 const overlay = $('#overlay');
 const octx = overlay.getContext('2d');
@@ -44,6 +58,8 @@ const size = () => [app.project.output.w, app.project.output.h];
 const shapeById = (id) => app.project.shapes.find((s) => s.id === id) || null;
 const selected = () => shapeById(app.sel.shapeId);
 const clampPt = (p) => [Math.max(LIMIT[0], Math.min(LIMIT[1], p[0])), Math.max(LIMIT[0], Math.min(LIMIT[1], p[1]))];
+const copyPts = (pts) => pts.map((p) => [p[0], p[1]]);
+const even = (n) => Math.max(16, Math.min(8192, Math.round(n / 2) * 2));
 
 function toScreen(p) {
   const [W, H] = size();
@@ -61,7 +77,7 @@ function say(text, isError = false) {
   el.textContent = text;
   el.classList.toggle('err', isError);
   clearTimeout(msgTimer);
-  if (text) msgTimer = setTimeout(() => { el.textContent = ''; }, 6000);
+  if (text) msgTimer = setTimeout(() => { el.textContent = ''; }, 7000);
 }
 
 function h(tag, attrs = {}, ...children) {
@@ -91,7 +107,7 @@ function updateHistoryButtons() {
 
 function setProject(project, { resetHistory = false } = {}) {
   app.project = project;
-  if (!shapeById(app.sel.shapeId)) app.sel = { shapeId: null, point: -1, frame: -1 };
+  if (!shapeById(app.sel.shapeId)) app.sel = { shapeId: null, handle: -1 };
   if (resetHistory) app.history.reset(project);
   renderer.setSize(project.output.w, project.output.h);
   layout();
@@ -99,35 +115,99 @@ function setProject(project, { resetHistory = false } = {}) {
   updateHistoryButtons();
 }
 
-function select(shapeId, point = -1) {
-  if (app.sel.shapeId !== shapeId) app.editFrame = false;
-  app.sel = { shapeId, point, frame: -1 };
+function select(shapeId, handle = -1) {
+  app.sel = { shapeId, handle };
   refreshUI();
 }
 
-// ---------- layout ----------
+function setTarget(target) {
+  if (app.target === target) return;
+  app.target = target;
+  app.sel.handle = -1;
+  refreshUI();
+}
+
+function setTool(tool) {
+  app.tool = tool;
+  if (tool !== 'select') app.target = 'mask'; // points are added to and deleted from the mask
+  app.sel.handle = -1;
+  refreshUI();
+}
+
+// ---------- the two outlines ----------
+
+/** The point array a handle index refers to, for the given outline. */
+function outline(shape, kind) {
+  if (kind === 'mask') return shape.pts;
+  return isLinked(shape) ? shape.pts : effectiveFrame(shape);
+}
+
+/** Give the quad its own points so the mask can change without moving the content. */
+function unlink(shape) {
+  if (!shape.frame) shape.frame = copyPts(effectiveFrame(shape));
+}
+
+function relink(shape) {
+  shape.pts = copyPts(effectiveFrame(shape));
+  shape.frame = null;
+}
+
+/** Writable array for an outline. Editing the quad of an unlinked shape edits shape.frame. */
+function writable(shape, kind) {
+  if (kind === 'mask' || isLinked(shape)) return shape.pts;
+  unlink(shape);
+  return shape.frame;
+}
+
+// ---------- layout, zoom and pan ----------
 
 function layout() {
-  const stage = $('#stage');
   const sw = stage.clientWidth, sh = stage.clientHeight;
   const [W, H] = size();
-  const pad = 48;
-  const scale = Math.max(0.01, Math.min((sw - pad * 2) / W, (sh - pad * 2) / H));
-  app.view = { scale, ox: (sw - W * scale) / 2, oy: (sh - H * scale) / 2 };
-  Object.assign(sceneCanvas.style, {
-    left: app.view.ox + 'px', top: app.view.oy + 'px', width: W * scale + 'px', height: H * scale + 'px',
-  });
+  const pad = 20, top = 56; // the top band is kept clear for the Editing bar
+  const v = app.view;
+  v.fit = Math.max(0.01, Math.min((sw - pad * 2) / W, (sh - top - pad) / H));
+  v.scale = v.fit * v.zoom;
+  v.ox = (sw - W * v.scale) / 2 + v.panX;
+  v.oy = top + (sh - top - pad - H * v.scale) / 2 + v.panY;
+  Object.assign(sceneCanvas.style, { left: v.ox + 'px', top: v.oy + 'px', width: W * v.scale + 'px', height: H * v.scale + 'px' });
   const dpr = window.devicePixelRatio || 1;
-  overlay.width = Math.round(sw * dpr);
-  overlay.height = Math.round(sh * dpr);
+  const ow = Math.round(sw * dpr), oh = Math.round(sh * dpr);
+  if (overlay.width !== ow) overlay.width = ow;
+  if (overlay.height !== oh) overlay.height = oh;
+  $('#zoomPct').textContent = Math.round(v.zoom * 100) + '%';
+}
+
+/** Zoom the canvas about a point given in stage px (defaults to the stage centre). */
+function zoomAt(factor, cx = stage.clientWidth / 2, cy = stage.clientHeight / 2) {
+  const v = app.view;
+  const anchor = toNorm(cx, cy);
+  v.zoom = Math.max(ZOOM[0], Math.min(ZOOM[1], v.zoom * factor));
+  layout();
+  const [ax, ay] = toScreen(anchor);
+  v.panX += cx - ax;
+  v.panY += cy - ay;
+  layout();
+}
+
+function panBy(dx, dy) {
+  app.view.panX += dx;
+  app.view.panY += dy;
+  layout();
+}
+
+function fitView() {
+  Object.assign(app.view, { zoom: 1, panX: 0, panY: 0 });
+  layout();
 }
 
 // ---------- shape operations ----------
 
 function addShapes(shapes) {
   app.project.shapes.push(...shapes);
-  app.sel = { shapeId: shapes[shapes.length - 1].id, point: -1, frame: -1 };
-  app.editFrame = false;
+  app.sel = { shapeId: shapes[shapes.length - 1].id, handle: -1 };
+  app.target = 'quad';
+  app.tool = 'select';
   commit();
 }
 
@@ -135,7 +215,7 @@ function deleteShape(id) {
   const i = app.project.shapes.findIndex((s) => s.id === id);
   if (i < 0) return;
   app.project.shapes.splice(i, 1);
-  if (app.sel.shapeId === id) app.sel = { shapeId: null, point: -1, frame: -1 };
+  if (app.sel.shapeId === id) app.sel = { shapeId: null, handle: -1 };
   commit();
 }
 
@@ -150,7 +230,7 @@ function duplicateShape(id) {
   copy.pts = copy.pts.map((p) => [p[0] + d[0], p[1] + d[1]]);
   if (copy.frame) copy.frame = copy.frame.map((p) => [p[0] + d[0], p[1] + d[1]]);
   app.project.shapes.splice(app.project.shapes.indexOf(s) + 1, 0, copy);
-  app.sel = { shapeId: copy.id, point: -1, frame: -1 };
+  app.sel = { shapeId: copy.id, handle: -1 };
   commit();
 }
 
@@ -163,148 +243,230 @@ function moveLayer(id, dir) {
   commit();
 }
 
-/** Keep the content frame consistent when the number of outline points changes. */
-function beforePointCountChange(shape) {
-  if (shape.pts.length === 4) shape.frame = shape.pts.map((p) => [p[0], p[1]]);
-  else if (!shape.frame) shape.frame = bboxFrame(shape.pts);
-}
-function afterPointCountChange(shape) {
-  if (shape.pts.length === 4) { shape.frame = null; app.editFrame = false; }
-}
-
-function insertPoint(shape, edgeIdx, p) {
-  beforePointCountChange(shape);
-  shape.pts.splice(edgeIdx + 1, 0, [p[0], p[1]]);
-  afterPointCountChange(shape);
-  return edgeIdx + 1;
-}
-
-function removePoint(shape, idx) {
-  if (shape.pts.length <= 3) { say('A shape needs at least 3 points.', true); return false; }
-  beforePointCountChange(shape);
-  shape.pts.splice(idx, 1);
-  afterPointCountChange(shape);
-  return true;
-}
-
-/** Points in other shapes that sit exactly on this one and should move with it. */
-function weldedWith(shape, idx) {
-  const p = shape.pts[idx];
+/** Handles in other shapes that sit exactly on this one and should move with it. */
+function weldedWith(shape, kind, idx) {
+  const p = outline(shape, kind)[idx];
   const out = [];
   for (const s of app.project.shapes) {
     if (s === shape) continue;
-    s.pts.forEach((q, i) => { if (Math.abs(q[0] - p[0]) < WELD && Math.abs(q[1] - p[1]) < WELD) out.push({ shape: s, idx: i }); });
+    outline(s, kind).forEach((q, i) => {
+      if (Math.abs(q[0] - p[0]) < WELD && Math.abs(q[1] - p[1]) < WELD) out.push({ shape: s, kind, idx: i });
+    });
   }
   return out;
 }
 
+/** Every quad corner and mask point of the visible shapes, minus what `exclude` rejects. */
 function snapCandidates(exclude) {
   const out = [];
   for (const s of app.project.shapes) {
     if (!s.visible) continue;
-    s.pts.forEach((p, i) => { if (!exclude(s, i)) out.push(p); });
+    s.pts.forEach((p, i) => { if (!exclude(s, 'mask', i)) out.push(p); });
+    if (s.frame) s.frame.forEach((p, i) => { if (!exclude(s, 'quad', i)) out.push(p); });
   }
   return out;
 }
 
-// ---------- pointer interaction ----------
-
-function hitTest(mx, my) {
-  const m = [mx, my];
-  const sel = selected();
-  if (sel && app.editFrame && sel.pts.length !== 4) {
-    const frame = effectiveFrame(sel);
-    for (let i = 0; i < 4; i++) if (dist(toScreen(frame[i]), m) <= HIT) return { type: 'frame', shape: sel, idx: i };
+/** Nearest mask edge of a shape to a stage-px position. */
+function nearestEdge(shape, m) {
+  let best = null;
+  for (let i = 0; i < shape.pts.length; i++) {
+    const a = toScreen(shape.pts[i]), b = toScreen(shape.pts[(i + 1) % shape.pts.length]);
+    const c = closestOnSegment(m, a, b);
+    const d = dist(c.pt, m);
+    if (!best || d < best.d) best = { idx: i, d, a, b };
   }
-  const order = [...app.project.shapes].reverse().filter((s) => s.visible);
+  return best;
+}
+
+/** Where the Add point tool would act for a pointer at stage px `m`. */
+function addTargetAt(m) {
+  const sel = selected();
+  if (sel && sel.visible) return { shape: sel, edge: nearestEdge(sel, m) };
+  let best = null;
+  for (const s of app.project.shapes) {
+    if (!s.visible) continue;
+    const e = nearestEdge(s, m);
+    if (e && (!best || e.d < best.edge.d)) best = { shape: s, edge: e };
+  }
+  return best;
+}
+
+/** The mask point the Delete point tool would remove for a pointer at stage px `m`. */
+function deleteTargetAt(m) {
+  const sel = selected();
+  const order = app.project.shapes.filter((s) => s.visible).reverse();
   if (sel && sel.visible) { order.splice(order.indexOf(sel), 1); order.unshift(sel); }
   for (const s of order) {
-    let best = -1, bestD = HIT;
+    let best = -1, bestD = HIT + 3;
     s.pts.forEach((p, i) => { const d = dist(toScreen(p), m); if (d <= bestD) { bestD = d; best = i; } });
-    if (best >= 0) return { type: 'point', shape: s, idx: best };
-  }
-  if (sel && sel.visible) {
-    for (let i = 0; i < sel.pts.length; i++) {
-      const a = toScreen(sel.pts[i]), b = toScreen(sel.pts[(i + 1) % sel.pts.length]);
-      const c = closestOnSegment(m, a, b);
-      if (dist(c.pt, m) <= 6) return { type: 'edge', shape: sel, idx: i, at: toNorm(c.pt[0], c.pt[1]) };
-    }
-  }
-  const n = toNorm(mx, my);
-  for (const s of [...app.project.shapes].reverse()) {
-    if (s.visible && pointInPoly(n, s.pts)) return { type: 'body', shape: s };
+    if (best >= 0) return { shape: s, idx: best };
   }
   return null;
 }
 
+function addPointAt(m, snap) {
+  const t = addTargetAt(m);
+  if (!t) { say('Add a shape first.', true); return; }
+  let n = clampPt(toNorm(m[0], m[1]));
+  if (snap) {
+    const [W, H] = size();
+    n = snapPoint(n, snapCandidates((s) => s === t.shape), [W, H], SNAP / app.view.scale).pt;
+  }
+  unlink(t.shape);
+  t.shape.pts.splice(t.edge.idx + 1, 0, n);
+  app.sel = { shapeId: t.shape.id, handle: t.edge.idx + 1 };
+  app.target = 'mask';
+  app.tool = 'select';
+  commit();
+  say('Point added to the mask. Drag it to adjust.');
+}
+
+function deletePoint(shape, idx) {
+  if (shape.pts.length <= 3) { say('A mask needs at least 3 points.', true); return false; }
+  unlink(shape);
+  shape.pts.splice(idx, 1);
+  app.sel = { shapeId: shape.id, handle: -1 };
+  app.target = 'mask';
+  return true;
+}
+
+/** Resize the quad around its centre to the media's aspect ratio, as an upright rectangle. */
+function matchQuadToMedia(shape) {
+  const m = media.get(shape.content.mediaId);
+  if (!m || !m.w || !m.h) return;
+  const [W, H] = size();
+  const q = outline(shape, 'quad');
+  const b = bbox(q);
+  const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+  let wPx = (b.x1 - b.x0) * W, hPx = (b.y1 - b.y0) * H;
+  const mr = shape.rot % 2 ? m.h / m.w : m.w / m.h;
+  if (wPx / hPx > mr) wPx = hPx * mr; else hPx = wPx / mr;
+  const hw = wPx / W / 2, hh = hPx / H / 2;
+  const rect = [[cx - hw, cy - hh], [cx + hw, cy - hh], [cx + hw, cy + hh], [cx - hw, cy + hh]];
+  if (isLinked(shape)) shape.pts = rect; else shape.frame = rect;
+}
+
+// ---------- pointer interaction ----------
+
+function hitTest(m) {
+  const sel = selected();
+  if (sel && sel.visible) {
+    const pts = outline(sel, app.target);
+    let best = -1, bestD = HIT;
+    pts.forEach((p, i) => { const d = dist(toScreen(p), m); if (d <= bestD) { bestD = d; best = i; } });
+    if (best >= 0) return { type: 'handle', shape: sel, idx: best };
+  }
+  const n = toNorm(m[0], m[1]);
+  for (const s of [...app.project.shapes].reverse()) {
+    if (s.visible && pointInPoly(n, s.pts)) return { type: 'body', shape: s };
+  }
+  if (sel && sel.visible && pointInPoly(n, effectiveFrame(sel))) return { type: 'body', shape: sel };
+  return null;
+}
+
 function localXY(e) {
-  const r = overlay.getBoundingClientRect();
+  const r = stage.getBoundingClientRect();
   return [e.clientX - r.left, e.clientY - r.top];
 }
 
+const touches = new Map(); // active touch pointers, for pinch zoom on touch screens
+let pinch = null;
+
 overlay.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0 || app.busy) return;
-  const [mx, my] = localXY(e);
-  const hit = hitTest(mx, my);
+  const m = localXY(e);
+  if (e.pointerType === 'touch') {
+    touches.set(e.pointerId, m);
+    if (touches.size === 2) {
+      abandonDrag();
+      const [a, b] = [...touches.values()];
+      pinch = { d: dist(a, b), c: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] };
+      return;
+    }
+  }
+  if ((e.button !== 0 && e.button !== 1) || app.busy) return;
   if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+  if (e.button === 1) { // middle button drags the view
+    capture(e);
+    app.drag = { type: 'pan', last: m, moved: false };
+    e.preventDefault();
+    return;
+  }
+  if (app.tool === 'add') { addPointAt(m, !e.metaKey); return; }
+  if (app.tool === 'delete') {
+    const t = deleteTargetAt(m);
+    if (!t) { say('Click a mask point to delete it.'); return; }
+    if (deletePoint(t.shape, t.idx)) { app.tool = 'select'; commit(); say('Point deleted from the mask.'); } else refreshUI();
+    return;
+  }
+  const hit = hitTest(m);
   if (!hit) { select(null); return; }
-  overlay.setPointerCapture(e.pointerId);
-  const n = toNorm(mx, my);
-  if (hit.type === 'frame') {
-    if (!hit.shape.frame) hit.shape.frame = effectiveFrame(hit.shape).map((p) => [p[0], p[1]]);
-    app.sel = { shapeId: hit.shape.id, point: -1, frame: hit.idx };
-    app.drag = { type: 'frame', shape: hit.shape, idx: hit.idx, moved: false };
-  } else if (hit.type === 'point' || hit.type === 'edge') {
-    let idx = hit.idx, inserted = false;
-    if (hit.type === 'edge') { idx = insertPoint(hit.shape, hit.idx, hit.at); inserted = true; }
-    const welded = e.altKey || inserted ? [] : weldedWith(hit.shape, idx);
-    const changedSel = app.sel.shapeId !== hit.shape.id;
-    if (changedSel) app.editFrame = false;
-    app.sel = { shapeId: hit.shape.id, point: idx, frame: -1 };
-    app.drag = { type: 'point', shape: hit.shape, idx, welded, moved: inserted };
-    if (changedSel || inserted) refreshUI();
+  capture(e);
+  // Snapshot for abandonDrag: a touch drag can turn into a pinch after it has already moved things.
+  const before = JSON.stringify(app.project.shapes);
+  if (hit.type === 'handle') {
+    const kind = app.target;
+    // Shared corners move together only for quads; a mask point is always moved on its own.
+    const welded = e.altKey || kind === 'mask' ? [] : weldedWith(hit.shape, kind, hit.idx);
+    app.sel = { shapeId: hit.shape.id, handle: hit.idx };
+    app.drag = { type: 'handle', shape: hit.shape, kind, idx: hit.idx, welded, moved: false, before };
   } else {
-    if (app.sel.shapeId !== hit.shape.id || app.sel.point !== -1) select(hit.shape.id);
+    if (app.sel.shapeId !== hit.shape.id || app.sel.handle !== -1) select(hit.shape.id);
     app.drag = {
-      type: 'shape', shape: hit.shape, start: n, moved: false,
-      pts: hit.shape.pts.map((p) => [p[0], p[1]]),
-      frame: hit.shape.frame ? hit.shape.frame.map((p) => [p[0], p[1]]) : null,
+      type: 'shape', shape: hit.shape, start: toNorm(m[0], m[1]), moved: false, before,
+      pts: copyPts(hit.shape.pts), frame: hit.shape.frame ? copyPts(hit.shape.frame) : null,
     };
   }
 });
 
 overlay.addEventListener('pointermove', (e) => {
-  const [mx, my] = localXY(e);
+  const m = localXY(e);
+  app.hover = m;
+  if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+    touches.set(e.pointerId, m);
+    if (pinch && touches.size === 2) {
+      const [a, b] = [...touches.values()];
+      const d = dist(a, b), c = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      if (pinch.d > 0) zoomAt(d / pinch.d, c[0], c[1]);
+      panBy(c[0] - pinch.c[0], c[1] - pinch.c[1]);
+      pinch = { d, c };
+      return;
+    }
+  }
   const d = app.drag;
   if (!d) {
-    const hit = app.busy ? null : hitTest(mx, my);
-    overlay.style.cursor = !hit ? 'default' : hit.type === 'body' ? 'move' : hit.type === 'edge' ? 'copy' : 'crosshair';
+    if (app.tool !== 'select') { overlay.style.cursor = 'crosshair'; return; }
+    const hit = app.busy ? null : hitTest(m);
+    overlay.style.cursor = !hit ? 'default' : hit.type === 'body' ? 'move' : 'crosshair';
+    return;
+  }
+  if (d.type === 'pan') {
+    panBy(m[0] - d.last[0], m[1] - d.last[1]);
+    d.last = m;
     return;
   }
   const [W, H] = size();
   const tol = SNAP / app.view.scale;
   const useSnap = !e.metaKey;
-  let n = clampPt(toNorm(mx, my));
+  let n = clampPt(toNorm(m[0], m[1]));
   app.snapMark = null;
 
-  if (d.type === 'point') {
+  if (d.type === 'handle') {
     if (useSnap) {
       const moving = new Set(d.welded.map((w) => w.shape.id + ':' + w.idx));
-      const cands = snapCandidates((s, i) => s === d.shape || moving.has(s.id + ':' + i));
+      const linked = isLinked(d.shape);
+      const cands = snapCandidates((s, kind, i) =>
+        (s === d.shape && (kind === d.kind || linked)) || (kind === d.kind && moving.has(s.id + ':' + i)) ||
+        (isLinked(s) && d.kind === 'quad' && kind === 'mask' && moving.has(s.id + ':' + i)));
       const r = snapPoint(n, cands, [W, H], tol);
       n = r.pt;
       if (r.snapped) app.snapMark = n;
     }
-    d.shape.pts[d.idx] = n;
-    for (const w of d.welded) w.shape.pts[w.idx] = [n[0], n[1]];
-    d.moved = true;
-  } else if (d.type === 'frame') {
-    if (useSnap) {
-      const r = snapPoint(n, snapCandidates(() => false), [W, H], tol);
-      n = r.pt;
-      if (r.snapped) app.snapMark = n;
-    }
-    d.shape.frame[d.idx] = n;
+    // Moving a mask point of a linked shape is what separates the mask from the quad. It happens
+    // here, on the first real movement, so a click that never drags leaves the shape linked.
+    if (d.kind === 'mask' && isLinked(d.shape)) unlink(d.shape);
+    writable(d.shape, d.kind)[d.idx] = n;
+    for (const w of d.welded) writable(w.shape, w.kind)[w.idx] = [n[0], n[1]];
     d.moved = true;
   } else if (d.type === 'shape') {
     let dx = n[0] - d.start[0], dy = n[1] - d.start[1];
@@ -312,7 +474,7 @@ overlay.addEventListener('pointermove', (e) => {
     if (useSnap) {
       const cands = snapCandidates((s) => s === d.shape);
       let best = null, bestD = tol;
-      for (const p of d.pts) {
+      for (const p of d.frame ? [...d.pts, ...d.frame] : d.pts) {
         const moved = [p[0] + dx, p[1] + dy];
         const r = snapPoint(moved, cands, [W, H], tol);
         if (!r.snapped) continue;
@@ -327,16 +489,60 @@ overlay.addEventListener('pointermove', (e) => {
   }
 });
 
-function endDrag(e) {
+/** Drop the drag in progress and put the shapes back as they were when it started. */
+function abandonDrag() {
+  const d = app.drag;
+  if (!d) return;
+  app.drag = null;
+  app.snapMark = null;
+  if (d.before && d.moved) {
+    app.project.shapes = JSON.parse(d.before);
+    refreshUI();
+  }
+}
+
+function capture(e) {
+  try { overlay.setPointerCapture(e.pointerId); } catch (_) { /* pointer already gone */ }
+}
+
+function endPointer(e) {
+  if (e.pointerType === 'touch') {
+    touches.delete(e.pointerId);
+    if (touches.size < 2) pinch = null;
+  }
   const d = app.drag;
   if (!d) return;
   app.drag = null;
   app.snapMark = null;
   try { overlay.releasePointerCapture(e.pointerId); } catch (_) { /* already released */ }
-  if (d.moved) commit();
+  if (d.type === 'pan') return;
+  if (d.moved) commit(); else refreshUI();
 }
-overlay.addEventListener('pointerup', endDrag);
-overlay.addEventListener('pointercancel', endDrag);
+overlay.addEventListener('pointerup', endPointer);
+overlay.addEventListener('pointercancel', endPointer);
+overlay.addEventListener('pointerleave', () => { app.hover = null; });
+overlay.addEventListener('auxclick', (e) => e.preventDefault());
+
+// Pinch on a trackpad arrives as a ctrl+wheel event. It must never zoom the page: over the canvas
+// it zooms the canvas, anywhere else it does nothing. A plain two-finger scroll pans the canvas.
+window.addEventListener('wheel', (e) => {
+  const overStage = stage.contains(e.target);
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    if (overStage && !app.busy) {
+      const [x, y] = localXY(e);
+      // Trackpad pinch deltas are small; a mouse wheel notch is ~100, so cap the step.
+      zoomAt(Math.exp(-Math.max(-50, Math.min(50, e.deltaY)) * 0.01), x, y);
+    }
+  } else if (overStage) {
+    e.preventDefault();
+    if (!app.busy) panBy(-e.deltaX, -e.deltaY);
+  }
+}, { passive: false });
+// Safari's own pinch events, for completeness.
+for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+  window.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+}
 
 // ---------- keyboard ----------
 
@@ -346,11 +552,12 @@ function nudge(dx, dy) {
   const [W, H] = size();
   const d = [dx / W, dy / H];
   const move = (p) => clampPt([p[0] + d[0], p[1] + d[1]]);
-  if (app.sel.frame >= 0 && s.frame) s.frame[app.sel.frame] = move(s.frame[app.sel.frame]);
-  else if (app.sel.point >= 0) {
-    const welded = weldedWith(s, app.sel.point);
-    s.pts[app.sel.point] = move(s.pts[app.sel.point]);
-    for (const w of welded) w.shape.pts[w.idx] = [...s.pts[app.sel.point]];
+  if (app.sel.handle >= 0) {
+    if (app.target === 'mask' && isLinked(s)) unlink(s);
+    const welded = app.target === 'mask' ? [] : weldedWith(s, app.target, app.sel.handle);
+    const arr = writable(s, app.target);
+    arr[app.sel.handle] = move(arr[app.sel.handle]);
+    for (const w of welded) writable(w.shape, w.kind)[w.idx] = [...arr[app.sel.handle]];
   } else {
     s.pts = s.pts.map(move);
     if (s.frame) s.frame = s.frame.map(move);
@@ -373,19 +580,24 @@ window.addEventListener('keydown', (e) => {
   if ($('#exportDlg').open || app.busy) return;
   const mod = e.metaKey || e.ctrlKey;
   const key = e.key;
-  if (mod && key.toLowerCase() === 'z') {
+  const lower = key.toLowerCase();
+  if (mod && lower === 'z') {
     e.preventDefault();
     const p = e.shiftKey ? app.history.redo() : app.history.undo();
-    if (p) { setProject(sanitizeKeepIds(p)); autosave(app.project); }
-  } else if (mod && key.toLowerCase() === 'd') {
+    if (p) { setProject(sanitize(p)); autosave(app.project); }
+  } else if (mod && lower === 'd') {
     e.preventDefault();
     if (app.sel.shapeId) duplicateShape(app.sel.shapeId);
+  } else if (mod) {
+    return;
   } else if (key === 'Delete' || key === 'Backspace') {
     const s = selected();
     if (!s) return;
     e.preventDefault();
-    if (app.sel.point >= 0) {
-      if (removePoint(s, app.sel.point)) { app.sel.point = -1; commit(); }
+    if (app.sel.handle >= 0 && app.target === 'mask') {
+      if (deletePoint(s, app.sel.handle)) commit(); else refreshUI();
+    } else if (app.sel.handle >= 0) {
+      say('The quad always has 4 corners. Switch to Mask to delete a point.', true);
     } else deleteShape(s.id);
   } else if (key.startsWith('Arrow')) {
     const step = e.shiftKey ? 10 : 1;
@@ -395,15 +607,27 @@ window.addEventListener('keydown', (e) => {
       clearTimeout(nudgeTimer);
       nudgeTimer = setTimeout(() => commit(false), 350);
     }
-  } else if (key === 'Escape') select(null);
-  else if (key === ' ') { e.preventDefault(); togglePlay(); }
-  else if (key.toLowerCase() === 'g' && !mod) { app.guides = !app.guides; $('#guides').checked = app.guides; }
+  } else if (key === 'Escape') {
+    if (app.tool !== 'select') setTool('select'); else select(null);
+  } else if (key === ' ') { e.preventDefault(); togglePlay(); }
+  else if (lower === 'g') { app.guides = !app.guides; $('#guides').checked = app.guides; }
+  else if (lower === 'v') setTool('select');
+  else if (lower === 'a') setTool(app.tool === 'add' ? 'select' : 'add');
+  else if (lower === 'd') setTool(app.tool === 'delete' ? 'select' : 'delete');
+  else if (lower === 'q') setTarget('quad');
+  else if (lower === 'm') setTarget('mask');
+  else if (key === '0') fitView();
+  else if (key === '=' || key === '+') zoomAt(1.25);
+  else if (key === '-') zoomAt(0.8);
 });
 
-// History snapshots are our own output, so they only need a structural pass.
-const sanitizeKeepIds = (p) => sanitize(p);
-
 // ---------- overlay drawing ----------
+
+function tracePoly(ctx, pts, map) {
+  ctx.beginPath();
+  pts.forEach((p, i) => { const [x, y] = map(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.closePath();
+}
 
 function drawOverlay() {
   const dpr = window.devicePixelRatio || 1;
@@ -412,86 +636,146 @@ function drawOverlay() {
   const sel = selected();
   octx.lineJoin = 'round';
 
+  // Output frame, so the edge of the projection is visible when zoomed or panned.
+  const [x0, y0] = toScreen([0, 0]), [x1, y1] = toScreen([1, 1]);
+  octx.lineWidth = 1;
+  octx.strokeStyle = 'rgba(255,255,255,.35)';
+  octx.strokeRect(x0 - 0.5, y0 - 0.5, x1 - x0 + 1, y1 - y0 + 1);
+
   for (const s of app.project.shapes) {
-    if (!s.visible) continue;
-    const isSel = s === sel;
-    octx.beginPath();
-    s.pts.forEach((p, i) => { const [x, y] = toScreen(p); i ? octx.lineTo(x, y) : octx.moveTo(x, y); });
-    octx.closePath();
-    octx.lineWidth = isSel ? 2 : 1;
-    octx.strokeStyle = isSel ? '#ffb020' : 'rgba(255,255,255,.45)';
+    if (!s.visible || s === sel) continue;
+    tracePoly(octx, s.pts, toScreen);
+    octx.lineWidth = 1;
+    octx.strokeStyle = 'rgba(255,255,255,.5)';
     octx.stroke();
-    s.pts.forEach((p, i) => {
-      const [x, y] = toScreen(p);
-      octx.beginPath();
-      octx.arc(x, y, isSel ? 6 : 3, 0, Math.PI * 2);
-      const active = isSel && app.sel.point === i;
-      octx.fillStyle = active ? '#ffb020' : isSel ? '#15161a' : 'rgba(255,255,255,.7)';
-      octx.fill();
-      if (isSel) { octx.lineWidth = 2; octx.strokeStyle = '#ffb020'; octx.stroke(); }
-    });
   }
 
-  if (sel && sel.visible && sel.pts.length !== 4) {
-    const frame = effectiveFrame(sel);
-    octx.beginPath();
-    frame.forEach((p, i) => { const [x, y] = toScreen(p); i ? octx.lineTo(x, y) : octx.moveTo(x, y); });
-    octx.closePath();
-    octx.setLineDash([6, 5]);
-    octx.lineWidth = 1.5;
-    octx.strokeStyle = app.editFrame ? '#00d1ff' : 'rgba(0,209,255,.45)';
-    octx.stroke();
-    octx.setLineDash([]);
-    if (app.editFrame) {
-      frame.forEach((p, i) => {
+  if (sel && sel.visible) {
+    const linked = isLinked(sel);
+    const active = app.target;
+    const draw = (kind) => {
+      const pts = outline(sel, kind);
+      const color = kind === 'quad' ? QUAD : MASK;
+      const on = kind === active;
+      tracePoly(octx, pts, toScreen);
+      octx.setLineDash(on ? [] : [5, 5]);
+      octx.lineWidth = on ? 2.5 : 1.5;
+      octx.globalAlpha = on ? 1 : 0.85;
+      octx.strokeStyle = color;
+      octx.stroke();
+      octx.setLineDash([]);
+      octx.globalAlpha = 1;
+      if (!on) return;
+      pts.forEach((p, i) => {
         const [x, y] = toScreen(p);
-        octx.fillStyle = app.sel.frame === i ? '#00d1ff' : '#15161a';
-        octx.strokeStyle = '#00d1ff';
+        const hot = app.sel.handle === i;
+        octx.fillStyle = hot ? color : '#15161a';
+        octx.strokeStyle = color;
         octx.lineWidth = 2;
-        octx.fillRect(x - 6, y - 6, 12, 12);
-        octx.strokeRect(x - 6, y - 6, 12, 12);
+        if (kind === 'quad') {
+          octx.fillRect(x - 6, y - 6, 12, 12);
+          octx.strokeRect(x - 6, y - 6, 12, 12);
+        } else {
+          octx.beginPath();
+          octx.arc(x, y, 6.5, 0, Math.PI * 2);
+          octx.fill();
+          octx.stroke();
+        }
       });
+    };
+    // Inactive outline first so the active one sits on top. A linked shape has one outline.
+    if (linked) draw(active);
+    else { draw(active === 'quad' ? 'mask' : 'quad'); draw(active); }
+
+    // Mark the content's top-left corner so Rotate and Flip are predictable.
+    const q = outline(sel, 'quad');
+    const [tx, ty] = toScreen(q[0]);
+    const c = toScreen([(q[0][0] + q[2][0]) / 2, (q[0][1] + q[2][1]) / 2]);
+    const len = Math.hypot(c[0] - tx, c[1] - ty) || 1;
+    octx.font = '600 10px -apple-system, system-ui, sans-serif';
+    octx.fillStyle = QUAD;
+    octx.textAlign = 'center';
+    octx.textBaseline = 'middle';
+    octx.fillText('TL', tx + ((c[0] - tx) / len) * 18, ty + ((c[1] - ty) / len) * 18);
+  }
+
+  // Tool previews.
+  if (app.hover && !app.drag && !app.busy) {
+    if (app.tool === 'add') {
+      const t = addTargetAt(app.hover);
+      if (t) {
+        octx.beginPath();
+        octx.moveTo(t.edge.a[0], t.edge.a[1]);
+        octx.lineTo(app.hover[0], app.hover[1]);
+        octx.lineTo(t.edge.b[0], t.edge.b[1]);
+        octx.setLineDash([4, 4]);
+        octx.lineWidth = 2;
+        octx.strokeStyle = '#7cff6b';
+        octx.stroke();
+        octx.setLineDash([]);
+        octx.beginPath();
+        octx.arc(app.hover[0], app.hover[1], 6.5, 0, Math.PI * 2);
+        octx.fillStyle = '#7cff6b';
+        octx.fill();
+      }
+    } else if (app.tool === 'delete') {
+      const t = deleteTargetAt(app.hover);
+      if (t) {
+        const [x, y] = toScreen(t.shape.pts[t.idx]);
+        octx.beginPath();
+        octx.arc(x, y, 10, 0, Math.PI * 2);
+        octx.fillStyle = 'rgba(255,90,106,.35)';
+        octx.fill();
+        octx.lineWidth = 2.5;
+        octx.strokeStyle = '#ff5a6a';
+        octx.stroke();
+        octx.beginPath();
+        octx.moveTo(x - 5, y - 5); octx.lineTo(x + 5, y + 5);
+        octx.moveTo(x + 5, y - 5); octx.lineTo(x - 5, y + 5);
+        octx.stroke();
+      }
     }
   }
 
   if (app.snapMark) {
     const [x, y] = toScreen(app.snapMark);
     octx.beginPath();
-    octx.arc(x, y, 11, 0, Math.PI * 2);
+    octx.arc(x, y, 12, 0, Math.PI * 2);
     octx.lineWidth = 2;
     octx.strokeStyle = '#7cff6b';
     octx.stroke();
   }
 }
 
-/** Outlines and the active point, drawn on the projector so you can align while looking at the surface. */
+/** Outlines and the active handle, drawn on the projector so you can align while looking at the surface. */
 function drawOutputGuides(ctx, W, H) {
   const sel = selected();
   const px = (p) => [p[0] * W, p[1] * H];
-  const unit = Math.max(1, Math.round(H / 540));
+  const unit = Math.max(1, Math.round(Math.min(W, H) / 540));
   ctx.lineJoin = 'round';
   for (const s of app.project.shapes) {
-    if (!s.visible) continue;
-    ctx.beginPath();
-    s.pts.forEach((p, i) => { const [x, y] = px(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-    ctx.closePath();
-    ctx.lineWidth = (s === sel ? 2 : 1) * unit;
-    ctx.strokeStyle = s === sel ? '#ffb020' : 'rgba(255,255,255,.8)';
+    if (!s.visible || s === sel) continue;
+    tracePoly(ctx, s.pts, px);
+    ctx.lineWidth = unit;
+    ctx.strokeStyle = 'rgba(255,255,255,.8)';
     ctx.stroke();
   }
-  if (!sel) return;
-  let active = null;
-  if (app.sel.frame >= 0 && sel.frame) active = sel.frame[app.sel.frame];
-  else if (app.sel.point >= 0) active = sel.pts[app.sel.point];
-  sel.pts.forEach((p) => {
+  if (!sel || !sel.visible) return;
+  const color = app.target === 'quad' ? QUAD : MASK;
+  const pts = outline(sel, app.target);
+  tracePoly(ctx, pts, px);
+  ctx.lineWidth = 2 * unit;
+  ctx.strokeStyle = color;
+  ctx.stroke();
+  pts.forEach((p) => {
     const [x, y] = px(p);
     ctx.beginPath();
     ctx.arc(x, y, 4 * unit, 0, Math.PI * 2);
-    ctx.fillStyle = '#ffb020';
+    ctx.fillStyle = color;
     ctx.fill();
   });
-  if (active) {
-    const [x, y] = px(active);
+  if (app.sel.handle >= 0 && pts[app.sel.handle]) {
+    const [x, y] = px(pts[app.sel.handle]);
     const r = 22 * unit;
     ctx.lineWidth = unit;
     ctx.strokeStyle = '#00ff88';
@@ -541,10 +825,23 @@ function tick(token) {
 // rAF stops when the host window is hidden or closed; this restarts the loop on whichever window is live.
 setInterval(() => { if (performance.now() - lastTick > 600) schedule(); }, 500);
 
+/** Pixel size of the output window's display area. */
+function outputWindowPixels(w) {
+  const dpr = w.devicePixelRatio || 1;
+  return [even(w.innerWidth * dpr), even(w.innerHeight * dpr)];
+}
+
 function presentOutput() {
   const w = app.outWin;
   if (!w) return;
-  if (w.closed) { app.outWin = null; app.outCtx = null; $('#openOut').textContent = 'Open output'; return; }
+  if (w.closed) {
+    app.outWin = null;
+    app.outCtx = null;
+    app.outFs = false;
+    $('#openOut').textContent = 'Open output';
+    updateOutInfo();
+    return;
+  }
   try {
     const c = w.document.getElementById('out');
     if (!c) return;
@@ -556,6 +853,22 @@ function presentOutput() {
     }
     app.outCtx.drawImage(sceneCanvas, 0, 0);
     if (app.guides && !app.recording) drawOutputGuides(app.outCtx, W, H);
+
+    // When the output goes fullscreen on a display whose pixel size differs from the output size,
+    // adopt the display's size, so the projection and every export match the device exactly.
+    const fs = !!w.document.fullscreenElement;
+    if (fs !== app.outFs) {
+      app.outFs = fs;
+      app.outFsSettle = fs ? 20 : 0; // let the window finish resizing before measuring it
+      if (!fs) updateOutInfo();
+    } else if (fs && app.outFsSettle > 0 && --app.outFsSettle === 0) {
+      const [tw, th] = outputWindowPixels(w);
+      if ((tw !== W || th !== H) && !app.recording && !app.drag) {
+        setOutputSize(tw, th);
+        say(`Output set to the display: ${tw} x ${th}. Undo reverts it.`);
+      }
+      updateOutInfo();
+    }
   } catch (_) { /* window still loading */ }
 }
 
@@ -565,6 +878,7 @@ function openOutput() {
   if (!w) { say('The browser blocked the output window. Allow pop-ups for this site.', true); return; }
   app.outWin = w;
   app.outCtx = null;
+  app.outFs = false;
   $('#openOut').textContent = 'Focus output';
 }
 
@@ -580,9 +894,28 @@ function refreshUI() {
   renderLayers();
   renderProps();
   renderMedia();
+  renderTools();
   $('#empty').hidden = app.project.shapes.length > 0;
   if (document.activeElement !== $('#projName')) $('#projName').value = app.project.name;
   syncSizeUI();
+  updateOutInfo();
+}
+
+function renderTools() {
+  for (const b of document.querySelectorAll('#rail .tool')) b.classList.toggle('active', b.dataset.tool === app.tool);
+  for (const b of document.querySelectorAll('#targetBar .tgt')) {
+    b.classList.toggle('active', b.dataset.target === app.target);
+    b.setAttribute('aria-pressed', b.dataset.target === app.target ? 'true' : 'false');
+  }
+  const s = selected();
+  $('#targetBar').classList.toggle('off', !s);
+  $('#linkState').textContent = !s ? 'Select a shape' : isLinked(s) ? 'Mask follows the quad' : `Mask: ${s.pts.length} points, separate from the quad`;
+  const hint = $('#toolHint');
+  hint.hidden = app.tool === 'select';
+  hint.classList.toggle('del', app.tool === 'delete');
+  if (app.tool === 'add') hint.textContent = 'Click where the new mask point goes. Esc cancels.';
+  if (app.tool === 'delete') hint.textContent = 'Click the mask point to delete. Esc cancels.';
+  overlay.style.cursor = app.tool === 'select' ? 'default' : 'crosshair';
 }
 
 function contentSwatch(s) {
@@ -602,11 +935,17 @@ function renderLayers() {
     const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
     const sw = h('span', { class: 'swatch' });
     sw.style.background = contentSwatch(s);
+    const pct = h('span', { class: 'pct' }, Math.round(s.opacity * 100) + '%');
     box.append(h('div', { class: 'layer' + (s.id === app.sel.shapeId ? ' sel' : ''), onclick: () => select(s.id) },
       h('button', { title: s.visible ? 'Hide' : 'Show', 'aria-label': s.visible ? 'Hide layer' : 'Show layer', class: s.visible ? 'on' : '',
         onclick: stop(() => { s.visible = !s.visible; commit(); }) }, s.visible ? 'On' : 'Off'),
       sw,
       h('span', { class: 'nm' }, s.name),
+      h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: s.opacity, title: 'Layer opacity (transparency)', 'aria-label': `Opacity of ${s.name}`,
+        onclick: (e) => e.stopPropagation(),
+        oninput: (e) => { s.opacity = Number(e.target.value); pct.textContent = Math.round(s.opacity * 100) + '%'; },
+        onchange: () => commit() }),
+      pct,
       h('button', { title: 'Move up', 'aria-label': 'Move layer up', disabled: i === shapes.length - 1, onclick: stop(() => moveLayer(s.id, 1)) }, '↑'),
       h('button', { title: 'Move down', 'aria-label': 'Move layer down', disabled: i === 0, onclick: stop(() => moveLayer(s.id, -1)) }, '↓'),
     ));
@@ -621,7 +960,7 @@ function renderProps() {
   const box = $('#props');
   box.replaceChildren();
   const s = selected();
-  if (!s) { box.append(h('div', { class: 'none' }, 'Select a shape to edit it.')); return; }
+  if (!s) { box.append(h('div', { class: 'none' }, 'Select a shape to edit it, or add one with + Quad or + Box.')); return; }
   const c = s.content;
   const live = (fn) => (e) => { fn(e.target); };                     // while dragging a control
   const done = (fn) => (e) => { fn(e.target); commit(); };           // on release: undo step + refresh
@@ -657,15 +996,20 @@ function renderProps() {
   }
   if (c.type === 'media') {
     const items = [...media.values()];
-    const missing = !media.get(c.mediaId);
+    const m = media.get(c.mediaId);
     box.append(row('Source', h('select', { onchange: done((t) => {
-      const m = media.get(t.value);
-      if (m) { c.mediaId = m.id; c.mediaName = m.name; }
+      const pick = media.get(t.value);
+      if (pick) { c.mediaId = pick.id; c.mediaName = pick.name; }
     }) },
-      missing ? h('option', { value: '', selected: true }, c.mediaName ? `Missing: ${c.mediaName}` : 'None imported yet') : null,
-      items.map((m) => opt(m.id, m.name, c.mediaId)))));
-    box.append(row('Fit', h('select', { onchange: done((t) => { s.fit = t.value; }) },
-      opt('fill', 'Stretch to frame', s.fit), opt('cover', 'Cover (crop)', s.fit), opt('contain', 'Contain (bars)', s.fit))));
+      !m ? h('option', { value: '', selected: true }, c.mediaName ? `Missing: ${c.mediaName}` : 'None imported yet') : null,
+      items.map((it) => opt(it.id, it.name, c.mediaId)))));
+    box.append(row('Fit', h('select', { title: 'How the media fills the quad', onchange: done((t) => { s.fit = t.value; }) },
+      opt('fill', 'Stretch to the quad', s.fit), opt('cover', 'Cover (crop, no distortion)', s.fit), opt('contain', 'Contain (bars, no distortion)', s.fit))));
+    if (m && !m.error) {
+      box.append(h('div', { class: 'actions' },
+        h('button', { title: 'Reshape the quad to an upright rectangle with the media’s aspect ratio', onclick: () => { matchQuadToMedia(s); commit(); } },
+          `Match quad to media (${m.w} x ${m.h})`)));
+    }
   }
 
   box.append(row('Orientation', h('div', { class: 'pair' },
@@ -676,14 +1020,15 @@ function renderProps() {
   box.append(row('Blend', h('select', { onchange: done((t) => { s.blend = t.value; }) },
     opt('normal', 'Normal', s.blend), opt('add', 'Add', s.blend), opt('screen', 'Screen', s.blend), opt('multiply', 'Multiply', s.blend))));
 
-  if (s.pts.length === 4) {
-    box.append(h('p', { class: 'note' }, '4 points: the outline is also the content frame.'));
+  const q = h('b', { class: 'q' }, 'Quad');
+  const mk = h('b', { class: 'm' }, 'Mask');
+  if (isLinked(s)) {
+    box.append(h('p', { class: 'note' }, q, ' warps the content to 4 corners. ', mk, ' follows it until you reshape the mask or add a point.'));
   } else {
-    box.append(h('p', { class: 'note' }, `${s.pts.length} points: content is warped by a separate 4-corner frame (dashed).`));
+    box.append(h('p', { class: 'note' }, q, ' warps the content; ', mk, ` (${s.pts.length} points) decides what is visible.`));
     box.append(h('div', { class: 'actions' },
-      h('button', { class: app.editFrame ? 'on' : '', onclick: () => { app.editFrame = !app.editFrame; app.sel.frame = -1; renderProps(); } },
-        app.editFrame ? 'Done editing frame' : 'Edit content frame'),
-      h('button', { onclick: () => { s.frame = bboxFrame(s.pts); commit(); } }, 'Reset frame to bounds')));
+      h('button', { title: 'Make the mask the same 4 points as the quad again', onclick: () => { relink(s); app.sel.handle = -1; commit(); } }, 'Reset mask to quad'),
+      h('button', { title: 'Make the quad an upright rectangle around the mask', onclick: () => { s.frame = bboxFrame(s.pts); commit(); } }, 'Fit quad to mask')));
   }
 
   box.append(h('div', { class: 'actions' },
@@ -763,28 +1108,57 @@ function relinkMedia(project) {
 
 // ---------- output size ----------
 
-const SIZES = [[1280, 720], [1920, 1080], [1920, 1200], [2560, 1440], [3840, 2160]];
+const SIZES = [[1280, 720], [1920, 1080], [1920, 1200], [2560, 1440], [3840, 2160], [1080, 1920], [1200, 1920], [2160, 3840]];
 
 function syncSizeUI() {
   const sel = $('#outSize');
   const { w, h: hh } = app.project.output;
   if (!sel.options.length) {
-    for (const [a, b] of SIZES) sel.append(h('option', { value: `${a}x${b}` }, `${a} x ${b}`));
+    for (const [a, b] of SIZES) sel.append(h('option', { value: `${a}x${b}` }, `${a} x ${b}${b > a ? ' portrait' : ''}`));
     sel.append(h('option', { value: 'match' }, 'Match output window'));
     sel.append(h('option', { value: 'custom' }, 'Custom'));
   }
-  const key = `${w}x${hh}`;
   const preset = SIZES.some(([a, b]) => a === w && b === hh);
-  if (document.activeElement !== sel) sel.value = preset ? key : 'custom';
+  if (document.activeElement !== sel) sel.value = preset ? `${w}x${hh}` : 'custom';
   $('#customSize').hidden = sel.value !== 'custom';
   if (document.activeElement !== $('#outW')) $('#outW').value = w;
   if (document.activeElement !== $('#outH')) $('#outH').value = hh;
 }
 
+/** Say whether the output size matches the display the output window is on. */
+function updateOutInfo() {
+  const el = $('#outInfo');
+  const { w, h: hh } = app.project.output;
+  const orient = w === hh ? 'square' : w > hh ? 'landscape' : 'portrait';
+  let text = orient, warn = false;
+  try {
+    const win = app.outWin;
+    if (win && !win.closed && win.document.fullscreenElement) {
+      const [tw, th] = outputWindowPixels(win);
+      if (tw === w && th === hh) text = `${orient}, matches the display`;
+      else { text = `display is ${tw} x ${th}: letterboxed`; warn = true; }
+    }
+  } catch (_) { /* window still loading */ }
+  el.textContent = text;
+  el.classList.toggle('warn', warn);
+}
+
+/**
+ * Change the output size. Shape coordinates are normalized to the output, so a change of aspect
+ * ratio would stretch every shape; instead the layout is scaled uniformly and kept centred.
+ */
 function setOutputSize(w, hh) {
-  w = Math.max(16, Math.min(8192, Math.round(w / 2) * 2));
-  hh = Math.max(16, Math.min(8192, Math.round(hh / 2) * 2));
+  w = even(w);
+  hh = even(hh);
   if (!isFinite(w) || !isFinite(hh)) return;
+  const { w: W0, h: H0 } = app.project.output;
+  if (w === W0 && hh === H0) return;
+  const k = Math.min(w / W0, hh / H0);
+  const remap = (p) => [0.5 + ((p[0] - 0.5) * W0 * k) / w, 0.5 + ((p[1] - 0.5) * H0 * k) / hh];
+  for (const s of app.project.shapes) {
+    s.pts = s.pts.map(remap);
+    if (s.frame) s.frame = s.frame.map(remap);
+  }
   app.project.output = { w, h: hh };
   renderer.setSize(w, hh);
   layout();
@@ -814,10 +1188,11 @@ function updateExportInfo() {
   const dur = Number($('#exDur').value) || 0, fps = Number($('#exFps').value), mbps = Number($('#exBitrate').value) || 0;
   const mb = (dur * mbps) / 8;
   const mode = $('#exMode').value;
+  const orient = w === hh ? 'square' : w > hh ? 'landscape' : 'portrait';
   const extra = mode === 'offline'
     ? (ex.canOfflineExport() ? 'Renders every frame in order; takes as long as it needs.' : 'Offline rendering needs WebCodecs (Chrome).')
     : 'Captures the live canvas; pacing depends on this machine.';
-  $('#exInfo').textContent = `${w} x ${hh}, ${Math.round(dur * fps)} frames, about ${mb.toFixed(0)} MB, no audio. ${extra}`;
+  $('#exInfo').textContent = `${w} x ${hh} ${orient} (the output size), ${Math.round(dur * fps)} frames, about ${mb.toFixed(0)} MB, no audio. ${extra}`;
 }
 
 async function runExport() {
@@ -862,8 +1237,7 @@ async function runExport() {
     app.busy = false;
     app.recording = false;
     app.lastNow = performance.now();
-    if (wasPlaying) setPlaying(true);
-    else setPlaying(false);
+    setPlaying(wasPlaying);
     exportAbort = null;
     progress.hidden = true;
     $('#exStart').disabled = false;
@@ -875,10 +1249,22 @@ async function runExport() {
 // ---------- wiring ----------
 
 function wire() {
-  $('#addQuad').onclick = () => addShapes([quadShape(app.project.shapes.length)]);
-  $('#addBox').onclick = () => addShapes(boxShapes());
-  $('#undo').onclick = () => { const p = app.history.undo(); if (p) { setProject(sanitize(p)); autosave(app.project); } };
-  $('#redo').onclick = () => { const p = app.history.redo(); if (p) { setProject(sanitize(p)); autosave(app.project); } };
+  const addQuad = () => addShapes([quadShape(app.project.shapes.length)]);
+  const addBox = () => addShapes(boxShapes());
+  $('#addQuad').onclick = addQuad;
+  $('#addBox').onclick = addBox;
+  $('#emptyQuad').onclick = addQuad;
+  $('#emptyBox').onclick = addBox;
+  for (const b of document.querySelectorAll('#rail .tool')) {
+    b.onclick = () => setTool(app.tool === b.dataset.tool ? 'select' : b.dataset.tool);
+  }
+  for (const b of document.querySelectorAll('#targetBar .tgt')) b.onclick = () => setTarget(b.dataset.target);
+  $('#zoomIn').onclick = () => zoomAt(1.25);
+  $('#zoomOut').onclick = () => zoomAt(0.8);
+  $('#zoomFit').onclick = fitView;
+  const stepHistory = (p) => { if (p) { setProject(sanitize(p)); autosave(app.project); } };
+  $('#undo').onclick = () => stepHistory(app.history.undo());
+  $('#redo').onclick = () => stepHistory(app.history.redo());
   $('#openOut').onclick = openOutput;
   $('#guides').onchange = (e) => { app.guides = e.target.checked; };
   $('#testPattern').onchange = (e) => { app.testPattern = e.target.checked; };
@@ -889,7 +1275,8 @@ function wire() {
     const p = newProject();
     p.output = { ...app.project.output };
     app.project = p;
-    app.sel = { shapeId: null, point: -1, frame: -1 };
+    app.sel = { shapeId: null, handle: -1 };
+    app.tool = 'select';
     commit();
     say('Cleared. Undo brings it back.');
   };
@@ -897,22 +1284,23 @@ function wire() {
   $('#outSize').onchange = (e) => {
     const v = e.target.value;
     if (v === 'custom') { $('#customSize').hidden = false; $('#outW').focus(); return; }
+    e.target.blur();
     if (v === 'match') {
       const w = app.outWin;
-      e.target.blur();
-      if (!w || w.closed) { say('Open the output window first, put it fullscreen on the projector, then choose this again.', true); syncSizeUI(); return; }
-      const dpr = w.devicePixelRatio || 1;
-      setOutputSize(w.innerWidth * dpr, w.innerHeight * dpr);
+      if (!w || w.closed) { say('Open the output window first, then choose this again.', true); syncSizeUI(); return; }
+      const [tw, th] = outputWindowPixels(w);
+      setOutputSize(tw, th);
+      syncSizeUI();
       say(`Output set to ${app.project.output.w} x ${app.project.output.h}.`);
       return;
     }
     const [w, hh] = v.split('x').map(Number);
-    e.target.blur();
     setOutputSize(w, hh);
   };
   const customChanged = () => setOutputSize(Number($('#outW').value), Number($('#outH').value));
   $('#outW').onchange = customChanged;
   $('#outH').onchange = customChanged;
+  $('#rotateOut').onclick = () => { const { w, h: hh } = app.project.output; setOutputSize(hh, w); };
 
   $('#importMedia').onclick = () => $('#fileInput').click();
   $('#fileInput').onchange = (e) => { handleFiles(e.target.files); e.target.value = ''; };
@@ -955,7 +1343,7 @@ function wire() {
       if (!raw || !Array.isArray(raw.shapes)) throw new Error('Not a Cornerpin layout file.');
       const project = sanitize(raw);
       const missing = relinkMedia(project);
-      app.sel = { shapeId: null, point: -1, frame: -1 };
+      app.sel = { shapeId: null, handle: -1 };
       setProject(project);
       commit();
       $('#exportDlg').close();
@@ -965,7 +1353,7 @@ function wire() {
     }
   };
 
-  new ResizeObserver(layout).observe($('#stage'));
+  new ResizeObserver(layout).observe(stage);
   window.addEventListener('beforeunload', () => { try { app.outWin?.close(); } catch (_) { /* ignore */ } });
 }
 

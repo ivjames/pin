@@ -24,7 +24,7 @@ export function newShape(pts, name) {
     name: name || 'Shape',
     visible: true,
     pts: pts.map((p) => [p[0], p[1]]),
-    frame: null, // 4 corners, used only when the outline does not have exactly 4 points
+    frame: null, // the content quad's 4 corners; null on a 4-point shape = the mask follows the quad
     content: { type: 'solid', color, color2: '#101020', gradType: 'linear', angle: 0, shader: 'plasma', speed: 1, scale: 1, mediaId: null, mediaName: null },
     fit: 'fill',
     rot: 0,
@@ -68,7 +68,7 @@ export function sanitize(raw) {
     shape.id = typeof s.id === 'string' ? s.id : uid();
     shape.visible = s.visible !== false;
     const frame = (Array.isArray(s.frame) ? s.frame : []).map(pt).filter(Boolean);
-    shape.frame = frame.length === 4 && pts.length !== 4 ? frame : null;
+    shape.frame = frame.length === 4 ? frame : null;
     const c = s.content || {};
     shape.content = {
       type: ['solid', 'gradient', 'shader', 'media'].includes(c.type) ? c.type : 'solid',

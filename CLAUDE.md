@@ -75,11 +75,28 @@ as a phantom second build.)
   the live site means no deploy has run since the first clone.
 - `vendor/mp4-muxer.js` is a vendored copy of mp4-muxer 5.2.2 (MIT). It is not
   installed by anything; update it by replacing the file.
-- **No test suite in this repo.** v1 was verified in headless Chrome
-  (editing, warp accuracy, frame-accurate MP4 export, persistence) from
-  scripts that were not committed. It has not been run on a Mac, in
-  fullscreen, or through a real projector.
-- Coordinates in the project model are normalized to the output (0..1), so a
-  layout survives an output-size change. `js/geometry.js` holds the
-  homography; a shape with exactly 4 points warps content to its own corners,
-  and any other point count uses the separate 4-corner `frame`.
+- **No test suite in this repo.** Changes are verified in headless Chrome
+  (editing, tools, zoom, warp accuracy, frame-accurate MP4 export,
+  persistence) from scripts that are not committed. Trackpad pinch and real
+  fullscreen cannot be driven from there.
+- Coordinates in the project model are normalized to the output (0..1).
+  `setOutputSize` rescales every shape uniformly about the centre when the
+  size changes, so a change of aspect ratio does not stretch the layout.
+- **Each shape has a quad and a mask.** `pts` is the mask (N points, what is
+  visible); `frame` is the quad (4 corners the content is warped to).
+  `frame: null` on a 4-point shape means they are linked: the mask *is* the
+  quad. `outline()`, `unlink()` and `relink()` in `js/main.js` are the only
+  places that should decide which array a handle writes to. Projects saved by
+  v1 load unchanged; the reverse is not true once a 4-point mask has its own
+  quad, because v1 dropped `frame` on 4-point shapes.
+- **The page never scrolls or zooms; only the canvas does.** `html` and `body`
+  are `position: fixed`, and a window-level `wheel` listener cancels every
+  ctrl+wheel (what a trackpad pinch sends) and turns the ones over `#stage`
+  into canvas zoom. Anything new that needs to scroll has to live inside a
+  `.scroll` element in the dock.
+- **Output size follows the display.** When the output window enters
+  fullscreen, the editor reads its pixel size and adopts it (undoable).
+  `output.html` letterboxes with `object-fit: contain`, so a mismatch shows
+  bars and never distortion. In tests fullscreen is simulated by defining
+  `document.fullscreenElement` on the output page; a real fullscreen
+  transition has not been exercised.

@@ -2,10 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Cornerpin output</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; background: #000; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; }
+  /* object-fit: contain keeps the output's own aspect ratio. If the display's shape differs from
+     the output size, the picture is letterboxed, never stretched. */
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; background: #000; object-fit: contain; }
   #hint {
     position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
     font: 14px/1.4 -apple-system, system-ui, sans-serif; color: #fff; background: rgba(0, 0, 0, .7);
@@ -28,6 +31,7 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'f' || e.key === 'F') toggleFullscreen();
   });
+  window.addEventListener('wheel', function (e) { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
   if (!window.opener) {
     document.getElementById('hint').textContent = 'Open this window from the Cornerpin editor with "Open output".';
   }
