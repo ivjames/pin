@@ -46,7 +46,7 @@ or adding or deleting a mask point, separates them. `Reset mask to quad` joins t
 | Move a handle | Drag. Snaps to other corners and the output edges |
 | Skip snapping | Hold Cmd while dragging |
 | Move one quad corner of a shared set | Hold Option while dragging |
-| Edit the quad / the mask | Q / M |
+| Edit the quad / the mask / transform the shape | Q / M / T |
 | Add point / delete point tool | A / D, Esc to cancel |
 | Delete the selected mask point, or the shape | Delete |
 | Nudge | Arrow keys, 1 px; with Shift, 10 px |
@@ -72,11 +72,25 @@ simplified to at most 72 points. Plain hex fill colours carry over. Text, images
 lines and anything in `defs` are skipped, and a hole in a compound path becomes its own shape rather than a
 hole. To use an SVG as artwork instead, import it under Media; it is drawn as an image.
 
+## Shaping the quad
+
+- `Set shape…` in the bar makes the quad a true rectangle: Square, 4:3, 3:2, 16:9, their portrait forms, the
+  output's own shape, or the media's. It keeps the quad's centre and rotation and fits inside the space it had.
+- `Transform` (or T) puts a box around the whole shape. Drag inside to move. Corners scale in proportion; hold
+  Shift to scale freely. Side handles stretch one way. The round handle above the box rotates; Shift snaps to
+  15 degree steps. Scaling and rotating happen in output pixels, so nothing skews on a non-square output.
+- Quad and Mask modes still move single corners and points.
+
 ## Layout
 
 Every control is on screen at all times. The bar under the top bar holds everything for the selected shape,
 including Duplicate and Delete; it wraps onto more lines when the window is narrow and takes the room from
 the canvas. Only the Layers and Media lists scroll, and only when they hold more rows than fit.
+
+The tools arrange themselves around the canvas. The Add/Tool rail sits to the left or becomes a strip above the
+canvas, and Layers/Media sit to the right or become a strip below it. Whenever the window or the output size
+changes, the editor measures all four combinations and keeps the one that gives the largest canvas: a landscape
+output in a tall window gets strips above and below, a portrait output in a wide window gets side panels.
 
 `Test pattern` is always drawn behind every shape.
 
@@ -84,8 +98,8 @@ the canvas. Only the Layers and Media lists scroll, and only when they hold more
 
 The output size is the projector's pixel size, and it is also the size of every export. `Rotate` swaps width
 and height for a portrait display; the size menu has portrait presets. Changing the size rescales the layout
-uniformly and keeps it centred, so shapes are not stretched. For media, `Fit` chooses between stretching to the
-quad, cover, and contain; `Match quad to media` reshapes the quad to the media's own aspect ratio.
+uniformly by the shorter side and keeps it centred, so shapes are not stretched and Rotate is reversible. For media, `Fit` chooses between stretching to the
+quad, cover, and contain; `Set shape…` > `Same as media` reshapes the quad to the media's own aspect ratio.
 
 ## Export
 

@@ -80,8 +80,9 @@ as a phantom second build.)
   persistence) from scripts that are not committed. Trackpad pinch and real
   fullscreen cannot be driven from there.
 - Coordinates in the project model are normalized to the output (0..1).
-  `setOutputSize` rescales every shape uniformly about the centre when the
-  size changes, so a change of aspect ratio does not stretch the layout.
+  `setOutputSize` rescales every shape uniformly about the centre, by the ratio
+  of the shorter sides, so a change of aspect ratio does not stretch the layout
+  and swapping width and height twice is lossless.
 - **Each shape has a quad and a mask.** `pts` is the mask (N points, what is
   visible); `frame` is the quad (4 corners the content is warped to).
   `frame: null` on a 4-point shape means they are linked: the mask *is* the
@@ -94,6 +95,17 @@ as a phantom second build.)
   take their height from the canvas row, the rail is sized to fit. The only
   scrolling elements are the Layers and Media lists (`.scroll`). When adding
   a control, check it at 1000x600 as well as on a large window.
+- **The layout has four arrangements and picks one by measuring.** `arrange()`
+  in `js/main.js` sets `data-rail` (`left`/`top`) and `data-lists`
+  (`right`/`bottom`) on `<body>`, reads the stage size for each of the four
+  combinations, and keeps the one with the largest canvas scale, rejecting any
+  in which the rail overflows or the lists are squeezed flat. A new panel has
+  to work in all four; the CSS for them is the last block of `css/app.css`.
+- **Anything that must not skew is done in output pixels, in the shape's own
+  frame.** `localFrame()` rotates into the frame where the quad's top edge is
+  +x. Aspect presets, the transform box, scaling and rotation all go through
+  it. Doing the same maths in normalized coordinates is wrong on any
+  non-square output: a rotation would shear.
 - **SVG shape import never inserts the uploaded file into the page.**
   `js/svgimport.js` parses it with DOMParser and copies only numeric geometry,
   transform attributes and hex fills into clean elements in a hidden `<svg>`
