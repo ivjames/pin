@@ -14,6 +14,34 @@ function kindOf(type, name) {
   return null;
 }
 
+const isSVG = (m) => (m.blob && m.blob.type === 'image/svg+xml') || /\.svg$/i.test(m.name || '');
+
+/**
+ * createImageBitmap cannot decode an SVG blob, and an SVG may have no pixel size of its own.
+ * Load it through an <img> (which runs no scripts) and draw it to a canvas at a fixed resolution.
+ */
+async function rasterizeSVG(blob) {
+  const typed = blob.type === 'image/svg+xml' ? blob : new Blob([blob], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(typed);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('This SVG cannot be drawn as an image'));
+      img.src = url;
+    });
+    let w = img.naturalWidth, hgt = img.naturalHeight;
+    if (!w || !hgt) { w = 1024; hgt = 1024; }
+    const k = 2048 / Math.max(w, hgt);
+    const cw = Math.max(1, Math.round(w * k)), ch = Math.max(1, Math.round(hgt * k));
+    const canvas = new OffscreenCanvas(cw, ch);
+    canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+    return canvas.transferToImageBitmap();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function hydrate(rec) {
   const m = { ...rec, url: null, el: null, bitmap: null, w: 0, h: 0, duration: 0, version: 0, error: null };
   try {
@@ -35,7 +63,7 @@ async function hydrate(rec) {
       m.duration = isFinite(v.duration) ? v.duration : 0;
       v.play().catch(() => {});
     } else {
-      m.bitmap = await createImageBitmap(m.blob);
+      m.bitmap = isSVG(m) ? await rasterizeSVG(m.blob) : await createImageBitmap(m.blob);
       m.w = m.bitmap.width;
       m.h = m.bitmap.height;
     }

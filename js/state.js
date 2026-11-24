@@ -51,6 +51,39 @@ export function boxShapes() {
   ];
 }
 
+/** Unit-circle outlines for the preset shapes: x right, y down, radius 1. */
+export const PRESETS = {
+  triangle: { name: 'Triangle', pts: () => ring(3, -90) },
+  circle: { name: 'Circle', pts: () => ring(48, -90) },
+  hexagon: { name: 'Hexagon', pts: () => ring(6, 0) },
+  star: { name: 'Star', pts: () => ring(10, -90).map(([x, y], i) => (i % 2 ? [x * 0.42, y * 0.42] : [x, y])) },
+  arrow: { name: 'Arrow', pts: () => [[-1, -0.3], [0.2, -0.3], [0.2, -0.75], [1, 0], [0.2, 0.75], [0.2, 0.3], [-1, 0.3]] },
+};
+
+function ring(n, startDeg) {
+  return Array.from({ length: n }, (_, i) => {
+    const a = ((startDeg + (i * 360) / n) * Math.PI) / 180;
+    return [Math.cos(a), Math.sin(a)];
+  });
+}
+
+/**
+ * A preset mask, regular in output pixels (a circle is round whatever the output's aspect ratio).
+ * The quad is the upright rectangle around it, so content sits undistorted behind the mask.
+ */
+export function presetShape(kind, output, n = 0) {
+  const def = PRESETS[kind];
+  if (!def) return quadShape(n);
+  const r = Math.min(output.w, output.h) * 0.24;
+  const off = (n % 5) * 0.02;
+  const pts = def.pts().map(([x, y]) => [0.5 + off + (x * r) / output.w, 0.5 + off + (y * r) / output.h]);
+  const shape = newShape(pts, def.name);
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  shape.frame = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  return shape;
+}
+
 /** Validate and normalize a project loaded from storage or a JSON file. */
 export function sanitize(raw) {
   const p = newProject();

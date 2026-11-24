@@ -8,7 +8,8 @@
 
 import { Renderer, SHADERS, effectiveFrame, isLinked } from './renderer.js';
 import { pointInPoly, closestOnSegment, bboxFrame, snapPoint, bbox } from './geometry.js';
-import { newProject, quadShape, boxShapes, sanitize, History, autosave, loadSaved, uid } from './state.js';
+import { newProject, newShape, quadShape, boxShapes, presetShape, PRESETS, sanitize, History, autosave, loadSaved, uid } from './state.js';
+import { parseSVG, fitRings } from './svgimport.js';
 import { media, loadAll, importFiles, remove as removeMedia, findByName, setPlaying, restartAll } from './media.js';
 import { requestPersistence, storageEstimate } from './store.js';
 import * as ex from './exporter.js';
@@ -892,7 +893,7 @@ function togglePlay() {
 
 function refreshUI() {
   renderLayers();
-  renderProps();
+  renderInspector();
   renderMedia();
   renderTools();
   $('#empty').hidden = app.project.shapes.length > 0;
@@ -930,47 +931,64 @@ function renderLayers() {
   box.replaceChildren();
   const shapes = app.project.shapes;
   if (!shapes.length) { box.append(h('div', { class: 'none' }, 'No shapes yet.')); return; }
+  let selRow = null;
   [...shapes].reverse().forEach((s) => {
     const i = shapes.indexOf(s);
     const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
     const sw = h('span', { class: 'swatch' });
     sw.style.background = contentSwatch(s);
-    const pct = h('span', { class: 'pct' }, Math.round(s.opacity * 100) + '%');
-    box.append(h('div', { class: 'layer' + (s.id === app.sel.shapeId ? ' sel' : ''), onclick: () => select(s.id) },
+    const isSel = s.id === app.sel.shapeId;
+    const rowEl = h('div', { class: 'layer' + (isSel ? ' sel' : ''), onclick: () => select(s.id) },
       h('button', { title: s.visible ? 'Hide' : 'Show', 'aria-label': s.visible ? 'Hide layer' : 'Show layer', class: s.visible ? 'on' : '',
         onclick: stop(() => { s.visible = !s.visible; commit(); }) }, s.visible ? 'On' : 'Off'),
       sw,
-      h('span', { class: 'nm' }, s.name),
-      h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: s.opacity, title: 'Layer opacity (transparency)', 'aria-label': `Opacity of ${s.name}`,
+      h('span', { class: 'nm', title: s.name }, s.name),
+      h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: s.opacity, title: `Opacity ${Math.round(s.opacity * 100)}%`, 'aria-label': `Opacity of ${s.name}`,
         onclick: (e) => e.stopPropagation(),
-        oninput: (e) => { s.opacity = Number(e.target.value); pct.textContent = Math.round(s.opacity * 100) + '%'; },
+        oninput: (e) => { s.opacity = Number(e.target.value); e.target.title = `Opacity ${Math.round(s.opacity * 100)}%`; },
         onchange: () => commit() }),
-      pct,
-      h('button', { title: 'Move up', 'aria-label': 'Move layer up', disabled: i === shapes.length - 1, onclick: stop(() => moveLayer(s.id, 1)) }, '↑'),
-      h('button', { title: 'Move down', 'aria-label': 'Move layer down', disabled: i === 0, onclick: stop(() => moveLayer(s.id, -1)) }, '↓'),
-    ));
+      h('button', { title: 'Move up', 'aria-label': 'Move layer up', disabled: i === shapes.length - 1, onclick: stop(() => moveLayer(s.id, 1)) }, '\u2191'),
+      h('button', { title: 'Move down', 'aria-label': 'Move layer down', disabled: i === 0, onclick: stop(() => moveLayer(s.id, -1)) }, '\u2193'),
+      h('button', { class: 'danger', title: 'Delete this shape', 'aria-label': `Delete ${s.name}`, onclick: stop(() => deleteShape(s.id)) }, 'x'),
+    );
+    if (isSel) selRow = rowEl;
+    box.append(rowEl);
   });
+  // The list is the one place that can scroll; keep the selected row inside it.
+  if (selRow && selRow.scrollIntoView) selRow.scrollIntoView({ block: 'nearest' });
 }
 
-function row(label, control) {
-  return h('div', { class: 'row' }, h('label', {}, label), control);
+/** A labelled control group in the inspector bar. */
+function grp(label, ...controls) {
+  return h('span', { class: 'grp' }, label ? h('label', {}, label) : null, ...controls);
 }
 
-function renderProps() {
-  const box = $('#props');
+/**
+ * The inspector holds every control for the selected shape in one wrapping bar. It grows by
+ * wrapping onto another line and takes the space from the canvas, so nothing in it can ever be
+ * scrolled out of view.
+ */
+function renderInspector() {
+  const box = $('#inspector');
   box.replaceChildren();
   const s = selected();
-  if (!s) { box.append(h('div', { class: 'none' }, 'Select a shape to edit it, or add one with + Quad or + Box.')); return; }
+  if (!s) {
+    box.append(h('span', { class: 'none' }, 'No shape selected. Click a shape on the canvas or in Layers, or add one from the Add panel.'));
+    return;
+  }
   const c = s.content;
+  const shapes = app.project.shapes;
+  const idx = shapes.indexOf(s);
   const live = (fn) => (e) => { fn(e.target); };                     // while dragging a control
   const done = (fn) => (e) => { fn(e.target); commit(); };           // on release: undo step + refresh
-  const range = (value, min, max, step, set) =>
-    h('input', { type: 'range', min, max, step, value, oninput: live((t) => set(Number(t.value))), onchange: () => commit(false) });
+  const range = (value, min, max, step, set, title) =>
+    h('input', { type: 'range', min, max, step, value, title, oninput: live((t) => set(Number(t.value))), onchange: () => commit(false) });
   const opt = (value, text, cur) => h('option', { value, selected: value === cur }, text);
+  const color = (key) => h('input', { type: 'color', value: c[key], oninput: live((t) => { c[key] = t.value; }), onchange: () => commit() });
 
-  box.append(row('Name', h('input', { type: 'text', value: s.name, onchange: done((t) => { s.name = t.value.trim() || 'Shape'; }) })));
+  box.append(grp('Name', h('input', { type: 'text', value: s.name, onchange: done((t) => { s.name = t.value.trim() || 'Shape'; }) })));
 
-  box.append(row('Content', h('select', { onchange: done((t) => {
+  box.append(grp('Content', h('select', { onchange: done((t) => {
     c.type = t.value;
     if (c.type === 'media' && !media.get(c.mediaId)) {
       const first = [...media.values()].find((m) => !m.error);
@@ -978,62 +996,60 @@ function renderProps() {
     }
   }) }, opt('solid', 'Solid color', c.type), opt('gradient', 'Gradient', c.type), opt('shader', 'Shader effect', c.type), opt('media', 'Video or image', c.type))));
 
-  const color = (key) => h('input', { type: 'color', value: c[key], oninput: live((t) => { c[key] = t.value; }), onchange: () => commit() });
-
-  if (c.type === 'solid') box.append(row('Color', color('color')));
-  if (c.type === 'gradient' || c.type === 'shader') {
-    box.append(row('Colors', h('div', { class: 'pair' }, color('color'), color('color2'))));
-  }
+  if (c.type === 'solid') box.append(grp('Color', color('color')));
   if (c.type === 'gradient') {
-    box.append(row('Style', h('select', { onchange: done((t) => { c.gradType = t.value; }) }, opt('linear', 'Linear', c.gradType), opt('radial', 'Radial', c.gradType))));
-    if (c.gradType === 'linear') box.append(row('Angle', range(c.angle, 0, 360, 1, (v) => { c.angle = v; })));
+    box.append(grp('Colors', color('color'), color('color2')));
+    box.append(grp('Style', h('select', { onchange: done((t) => { c.gradType = t.value; }) }, opt('linear', 'Linear', c.gradType), opt('radial', 'Radial', c.gradType))));
+    if (c.gradType === 'linear') box.append(grp('Angle', range(c.angle, 0, 360, 1, (v) => { c.angle = v; })));
   }
   if (c.type === 'shader') {
-    box.append(row('Effect', h('select', { onchange: done((t) => { c.shader = t.value; }) }, SHADERS.map((sh) => opt(sh.id, sh.name, c.shader)))));
-    box.append(row('Speed', range(c.speed, 0, 4, 0.05, (v) => { c.speed = v; })));
-    box.append(row('Density', range(c.scale, 0.25, 6, 0.05, (v) => { c.scale = v; })));
-    if (['stripes', 'rainbow', 'scanner'].includes(c.shader)) box.append(row('Angle', range(c.angle, 0, 360, 1, (v) => { c.angle = v; })));
+    box.append(grp('Effect', h('select', { onchange: done((t) => { c.shader = t.value; }) }, SHADERS.map((sh) => opt(sh.id, sh.name, c.shader)))));
+    box.append(grp('Colors', color('color'), color('color2')));
+    box.append(grp('Speed', range(c.speed, 0, 4, 0.05, (v) => { c.speed = v; })));
+    box.append(grp('Density', range(c.scale, 0.25, 6, 0.05, (v) => { c.scale = v; })));
+    if (['stripes', 'rainbow', 'scanner'].includes(c.shader)) box.append(grp('Angle', range(c.angle, 0, 360, 1, (v) => { c.angle = v; })));
   }
   if (c.type === 'media') {
     const items = [...media.values()];
     const m = media.get(c.mediaId);
-    box.append(row('Source', h('select', { onchange: done((t) => {
+    box.append(grp('Source', h('select', { onchange: done((t) => {
       const pick = media.get(t.value);
       if (pick) { c.mediaId = pick.id; c.mediaName = pick.name; }
     }) },
       !m ? h('option', { value: '', selected: true }, c.mediaName ? `Missing: ${c.mediaName}` : 'None imported yet') : null,
       items.map((it) => opt(it.id, it.name, c.mediaId)))));
-    box.append(row('Fit', h('select', { title: 'How the media fills the quad', onchange: done((t) => { s.fit = t.value; }) },
-      opt('fill', 'Stretch to the quad', s.fit), opt('cover', 'Cover (crop, no distortion)', s.fit), opt('contain', 'Contain (bars, no distortion)', s.fit))));
-    if (m && !m.error) {
-      box.append(h('div', { class: 'actions' },
-        h('button', { title: 'Reshape the quad to an upright rectangle with the media’s aspect ratio', onclick: () => { matchQuadToMedia(s); commit(); } },
-          `Match quad to media (${m.w} x ${m.h})`)));
-    }
+    box.append(grp('Fit', h('select', { title: 'How the media fills the quad', onchange: done((t) => { s.fit = t.value; }) },
+      opt('fill', 'Stretch to the quad', s.fit), opt('cover', 'Cover (crop, no distortion)', s.fit), opt('contain', 'Contain (bars, no distortion)', s.fit)),
+      h('button', { disabled: !m || !!m.error, title: 'Reshape the quad to an upright rectangle with the media’s aspect ratio',
+        onclick: () => { matchQuadToMedia(s); commit(); } }, 'Match quad to media')));
   }
 
-  box.append(row('Orientation', h('div', { class: 'pair' },
+  box.append(grp('Turn',
     h('button', { onclick: () => { s.rot = (s.rot + 1) % 4; commit(); }, title: 'Rotate content 90 degrees' }, 'Rotate'),
-    h('button', { class: s.flipH ? 'on' : '', onclick: () => { s.flipH = !s.flipH; commit(); } }, 'Flip H'),
-    h('button', { class: s.flipV ? 'on' : '', onclick: () => { s.flipV = !s.flipV; commit(); } }, 'Flip V'))));
-  box.append(row('Opacity', range(s.opacity, 0, 1, 0.01, (v) => { s.opacity = v; })));
-  box.append(row('Blend', h('select', { onchange: done((t) => { s.blend = t.value; }) },
+    h('button', { class: s.flipH ? 'on' : '', onclick: () => { s.flipH = !s.flipH; commit(); }, title: 'Flip content horizontally' }, 'Flip H'),
+    h('button', { class: s.flipV ? 'on' : '', onclick: () => { s.flipV = !s.flipV; commit(); }, title: 'Flip content vertically' }, 'Flip V')));
+
+  const pct = h('span', { class: 'pct' }, Math.round(s.opacity * 100) + '%');
+  box.append(grp('Opacity',
+    h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: s.opacity, title: 'Layer opacity (transparency)',
+      oninput: (e) => { s.opacity = Number(e.target.value); pct.textContent = Math.round(s.opacity * 100) + '%'; }, onchange: () => commit() }),
+    pct));
+  box.append(grp('Blend', h('select', { onchange: done((t) => { s.blend = t.value; }) },
     opt('normal', 'Normal', s.blend), opt('add', 'Add', s.blend), opt('screen', 'Screen', s.blend), opt('multiply', 'Multiply', s.blend))));
 
-  const q = h('b', { class: 'q' }, 'Quad');
-  const mk = h('b', { class: 'm' }, 'Mask');
-  if (isLinked(s)) {
-    box.append(h('p', { class: 'note' }, q, ' warps the content to 4 corners. ', mk, ' follows it until you reshape the mask or add a point.'));
-  } else {
-    box.append(h('p', { class: 'note' }, q, ' warps the content; ', mk, ` (${s.pts.length} points) decides what is visible.`));
-    box.append(h('div', { class: 'actions' },
-      h('button', { title: 'Make the mask the same 4 points as the quad again', onclick: () => { relink(s); app.sel.handle = -1; commit(); } }, 'Reset mask to quad'),
-      h('button', { title: 'Make the quad an upright rectangle around the mask', onclick: () => { s.frame = bboxFrame(s.pts); commit(); } }, 'Fit quad to mask')));
-  }
+  const linked = isLinked(s);
+  box.append(grp('Mask',
+    h('button', { disabled: linked, title: 'Make the mask the same 4 points as the quad again', onclick: () => { relink(s); app.sel.handle = -1; commit(); } }, 'Reset mask to quad'),
+    h('button', { disabled: linked, title: 'Make the quad an upright rectangle around the mask', onclick: () => { s.frame = bboxFrame(s.pts); commit(); } }, 'Fit quad to mask')));
 
-  box.append(h('div', { class: 'actions' },
-    h('button', { onclick: () => duplicateShape(s.id), title: 'Cmd+D' }, 'Duplicate'),
-    h('button', { class: 'danger', onclick: () => deleteShape(s.id) }, 'Delete shape')));
+  box.append(grp('Layer',
+    h('button', { title: 'Move this layer up', disabled: idx === shapes.length - 1, onclick: () => moveLayer(s.id, 1) }, 'Up'),
+    h('button', { title: 'Move this layer down', disabled: idx === 0, onclick: () => moveLayer(s.id, -1) }, 'Down'),
+    h('button', { class: s.visible ? '' : 'on', title: 'Show or hide this layer', onclick: () => { s.visible = !s.visible; commit(); } }, s.visible ? 'Hide' : 'Show')));
+
+  box.append(h('span', { class: 'grp push' },
+    h('button', { onclick: () => duplicateShape(s.id), title: 'Duplicate this shape (Cmd+D)' }, 'Duplicate'),
+    h('button', { class: 'danger', onclick: () => deleteShape(s.id), title: 'Delete this shape (Delete key)' }, 'Delete shape')));
 }
 
 const fmtSize = (n) => (n > 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB');
@@ -1246,15 +1262,74 @@ async function runExport() {
   }
 }
 
+// ---------- adding shapes ----------
+
+function addPreset(kind) {
+  const n = app.project.shapes.length;
+  if (kind === 'quad') addShapes([quadShape(n)]);
+  else if (kind === 'box') addShapes(boxShapes());
+  else addShapes([presetShape(kind, app.project.output, n)]);
+}
+
+/** Every closed outline in an SVG file becomes a mask shape, fitted to the output with its proportions kept. */
+async function importSVGShapes(file) {
+  try {
+    if (file.size > 5e6) throw new Error('That SVG is larger than 5 MB.');
+    const { rings, skipped, bounds } = parseSVG(await file.text());
+    const [W, H] = size();
+    const base = file.name.replace(/\.svg$/i, '').slice(0, 40) || 'SVG';
+    const shapes = fitRings(rings, bounds, W, H).map((r, i) => {
+      const shape = newShape(r.pts, r.name || (rings.length > 1 ? `${base} ${i + 1}` : base));
+      shape.frame = bboxFrame(shape.pts);
+      if (r.color) shape.content.color = r.color;
+      return shape;
+    });
+    addShapes(shapes);
+    say(`Imported ${shapes.length} shape(s) from ${file.name}.` + (skipped ? ` ${skipped} element(s) skipped (text, images, open lines or references).` : ''));
+  } catch (err) {
+    say('SVG import failed: ' + (err.message || err), true);
+  }
+}
+
+/** Draw the Add buttons' icons from the same outlines the buttons create. */
+function buildShapeButtons() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const icon = (polys, cls) => {
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '-1.15 -1.15 2.3 2.3');
+    svg.setAttribute('aria-hidden', 'true');
+    for (const pts of polys) {
+      const el = document.createElementNS(NS, 'polygon');
+      el.setAttribute('points', pts.map((p) => p.join(',')).join(' '));
+      if (cls) el.setAttribute('class', cls);
+      el.setAttribute('vector-effect', 'non-scaling-stroke');
+      svg.append(el);
+    }
+    return svg;
+  };
+  const art = {
+    quad: [[[-1, -0.7], [0.9, -0.85], [1, 0.75], [-0.85, 0.8]]],
+    box: [[[-0.9, -0.45], [0, -0.05], [0, 1], [-0.9, 0.55]], [[0.08, -0.05], [0.98, -0.45], [0.98, 0.55], [0.08, 1]], [[-0.86, -0.55], [0.04, -0.95], [0.94, -0.55], [0.04, -0.15]]],
+  };
+  for (const b of document.querySelectorAll('#shapeGrid .shape')) {
+    const kind = b.dataset.add;
+    if (b.id === 'addSVG') {
+      b.append(icon([[[-0.9, -0.2], [-0.3, -0.9], [0.5, -0.6], [0.95, 0.1], [0.3, 0.9], [-0.6, 0.7]]], 'ln'), 'SVG file');
+      b.onclick = () => $('#svgInput').click();
+      continue;
+    }
+    b.append(icon(art[kind] || [PRESETS[kind].pts()]), kind === 'quad' ? 'Quad' : kind === 'box' ? 'Box' : PRESETS[kind].name);
+    b.onclick = () => addPreset(kind);
+  }
+  $('#svgInput').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importSVGShapes(f); };
+}
+
 // ---------- wiring ----------
 
 function wire() {
-  const addQuad = () => addShapes([quadShape(app.project.shapes.length)]);
-  const addBox = () => addShapes(boxShapes());
-  $('#addQuad').onclick = addQuad;
-  $('#addBox').onclick = addBox;
-  $('#emptyQuad').onclick = addQuad;
-  $('#emptyBox').onclick = addBox;
+  buildShapeButtons();
+  $('#emptyQuad').onclick = () => addPreset('quad');
+  $('#emptyBox').onclick = () => addPreset('box');
   for (const b of document.querySelectorAll('#rail .tool')) {
     b.onclick = () => setTool(app.tool === b.dataset.tool ? 'select' : b.dataset.tool);
   }

@@ -89,11 +89,22 @@ as a phantom second build.)
   places that should decide which array a handle writes to. Projects saved by
   v1 load unchanged; the reverse is not true once a 4-point mask has its own
   quad, because v1 dropped `frame` on 4-point shapes.
+- **No control may be scrolled out of view.** `#bar`, `#inspector` and `#rail`
+  must never get `overflow: auto` or a fixed height: the first two wrap and
+  take their height from the canvas row, the rail is sized to fit. The only
+  scrolling elements are the Layers and Media lists (`.scroll`). When adding
+  a control, check it at 1000x600 as well as on a large window.
+- **SVG shape import never inserts the uploaded file into the page.**
+  `js/svgimport.js` parses it with DOMParser and copies only numeric geometry,
+  transform attributes and hex fills into clean elements in a hidden `<svg>`
+  for measuring. Keep it that way: inserting the parsed nodes would run the
+  file's event-handler attributes. SVG *media* goes through an `<img>`, which
+  runs no scripts.
 - **The page never scrolls or zooms; only the canvas does.** `html` and `body`
   are `position: fixed`, and a window-level `wheel` listener cancels every
   ctrl+wheel (what a trackpad pinch sends) and turns the ones over `#stage`
   into canvas zoom. Anything new that needs to scroll has to live inside a
-  `.scroll` element in the dock.
+  `.scroll` list in the sidebar.
 - **Output size follows the display.** When the output window enters
   fullscreen, the editor reads its pixel size and adopts it (undoable).
   `output.html` letterboxes with `object-fit: contain`, so a mismatch shows

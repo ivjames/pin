@@ -15,16 +15,18 @@
 * { box-sizing: border-box; }
 
 /* The interface is pinned to the window: the page itself never scrolls or zooms.
-   Only the canvas zooms (handled in JS) and only the dock's own lists scroll. */
+   Only the canvas zooms (handled in JS) and only the Layers and Media lists scroll. */
 html, body {
   position: fixed; inset: 0; width: 100%; height: 100%; margin: 0;
   overflow: hidden; overscroll-behavior: none; touch-action: pan-x pan-y;
 }
 body {
   display: grid;
-  grid-template-columns: 104px minmax(0, 1fr);
-  grid-template-rows: auto minmax(120px, 1fr) clamp(190px, 30vh, 280px) auto;
-  grid-template-areas: "bar bar" "rail stage" "dock dock" "status status";
+  grid-template-columns: auto minmax(0, 1fr) minmax(210px, 280px);
+  /* bar and inspector take the height their controls need and wrap rather than scroll;
+     the canvas row gets whatever is left. */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "bar bar bar" "insp insp insp" "rail stage lists" "status status status";
   background: var(--bg); color: var(--text);
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   user-select: none; -webkit-user-select: none;
@@ -52,8 +54,8 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
 
 /* ---- top bar ---- */
 #bar {
-  grid-area: bar; display: flex; align-items: center; gap: 6px; padding: 6px 10px; min-width: 0;
-  background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none;
+  grid-area: bar; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; min-width: 0;
+  background: var(--panel); border-bottom: 1px solid var(--line);
 }
 #bar > * { flex: none; }
 .brand { letter-spacing: .04em; color: var(--accent); margin-right: 4px; }
@@ -65,21 +67,48 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
 .info.warn { color: var(--danger); }
 #customSize input { width: 70px; }
 
-/* ---- tool rail ---- */
+/* ---- inspector: every control for the selected shape, always on screen ---- */
+#inspector {
+  grid-area: insp; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 6px 10px;
+  min-height: 40px; min-width: 0; background: #17191e; border-bottom: 1px solid var(--line);
+}
+#inspector .grp { display: inline-flex; align-items: center; gap: 5px; flex: none; }
+#inspector .grp > label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+#inspector input[type=text] { width: 120px; }
+#inspector select { max-width: 170px; }
+#inspector input[type=range] { width: 84px; }
+#inspector .pct { width: 34px; color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+#inspector button { padding: 3px 8px; }
+#inspector .none { padding: 0; }
+#inspector .push { margin-left: auto; }
+
+/* ---- tool rail: nothing here scrolls ---- */
 #rail {
-  grid-area: rail; display: flex; flex-direction: column; gap: 6px; padding: 8px;
-  background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; scrollbar-width: none;
+  grid-area: rail; display: flex; flex-direction: column; gap: 5px; padding: 8px; width: 116px;
+  background: var(--panel); border-right: 1px solid var(--line); min-height: 0;
 }
-#rail .big { width: 100%; padding: 9px 4px; white-space: normal; line-height: 1.15; font-size: 12.5px; }
-#rail .add {
-  background: var(--accent); border-color: var(--accent); color: #1a1200; font-weight: 700; font-size: 14px;
-  display: flex; align-items: center; justify-content: center; gap: 5px; padding: 12px 4px;
+.rlabel { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; margin-top: 2px; }
+#shapeGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+#shapeGrid .shape {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  padding: 5px 2px 3px; font-size: 10.5px; line-height: 1.1; color: #1a1200; font-weight: 600;
+  background: var(--accent); border-color: var(--accent);
 }
-#rail .add:hover { filter: brightness(1.08); }
-#rail .add .ico { font-size: 20px; line-height: 1; }
+#shapeGrid .shape:hover { filter: brightness(1.08); }
+#shapeGrid .shape svg { width: 26px; height: 22px; display: block; }
+#shapeGrid .shape svg * { fill: #1a1200; stroke: none; }
+#shapeGrid .shape svg .ln { fill: none; stroke: #1a1200; stroke-width: 2; }
+#rail .tool { width: 100%; padding: 6px 4px; font-size: 12.5px; }
+#rail .two { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 4px; }
+#rail .two button { padding: 5px 2px; font-size: 12px; }
 #rail .tool.active { background: #ecedf2; color: #111; border-color: #ecedf2; font-weight: 600; }
 #rail #toolDel.active { background: var(--danger); border-color: var(--danger); color: #1a0306; }
 #rail #toolAdd.active { background: var(--ok); border-color: var(--ok); color: #06200a; }
+@media (max-height: 560px) {
+  #shapeGrid .shape svg { height: 16px; }
+  #rail { gap: 3px; padding: 5px 8px; }
+  #rail .tool { padding: 3px 4px; }
+}
 
 /* ---- stage ---- */
 #stage {
@@ -125,14 +154,14 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
 #empty p { margin: 0 0 12px; }
 button.huge { font-size: 16px; padding: 12px 22px; margin: 0 4px; }
 
-/* ---- dock ---- */
-#dock {
-  grid-area: dock; display: grid; grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(200px, 280px);
-  background: var(--panel); border-top: 1px solid var(--line); min-height: 0;
+/* ---- lists: layers and media. Only these two lists may scroll, and only when they are long. ---- */
+#lists {
+  grid-area: lists; display: grid; grid-template-rows: minmax(0, 3fr) minmax(0, 2fr);
+  background: var(--panel); border-left: 1px solid var(--line); min-height: 0; min-width: 0;
 }
-#dock > section { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 8px 10px 0; border-right: 1px solid var(--line); }
-#dock > section:last-child { border-right: 0; }
-#dock h2 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); flex: none; }
+#lists > section { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 8px 8px 0; }
+#lists > section + section { border-top: 1px solid var(--line); }
+#lists h2 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); flex: none; }
 .scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 8px; }
 
 .layer, .media { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 5px; cursor: pointer; }
@@ -140,16 +169,14 @@ button.huge { font-size: 16px; padding: 12px 22px; margin: 0 4px; }
 .layer.sel { background: #2c2a1c; box-shadow: inset 2px 0 0 var(--accent); }
 .layer .nm, .media .nm { flex: 1 1 auto; min-width: 40px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .layer button, .media button { padding: 0 6px; font-size: 12px; line-height: 20px; flex: none; }
-.layer input[type=range] { width: 64px; flex: none; }
-.layer .pct { width: 34px; flex: none; text-align: right; color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.layer input[type=range] { width: 46px; flex: none; }
+.layer { gap: 4px; padding: 3px 4px; }
+.layer button { padding: 0 5px; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, .25); flex: none; }
 .media .meta { color: var(--dim); font-size: 11px; white-space: nowrap; }
 .media.bad .nm { color: var(--danger); }
 .none { color: var(--dim); padding: 4px 0; }
 
-/* Shape properties flow into as many columns as the dock is wide. */
-#props { column-width: 270px; column-gap: 22px; }
-#props > * { break-inside: avoid; }
 .row { display: grid; grid-template-columns: 84px minmax(0, 1fr); align-items: center; gap: 8px; margin: 0 0 6px; }
 .row > label { color: var(--dim); }
 .row .pair { display: flex; gap: 4px; align-items: center; }
@@ -184,8 +211,4 @@ progress { width: 100%; grid-column: 1 / -1; accent-color: var(--accent); }
 body.dropping #stage::after {
   content: "Drop video or image files to import"; position: absolute; inset: 12px; display: grid; place-items: center;
   border: 2px dashed var(--quad); border-radius: 10px; background: rgba(0, 209, 255, .08); color: var(--quad); font-size: 16px;
-}
-
-@media (max-width: 900px) {
-  #dock { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, .9fr); }
 }

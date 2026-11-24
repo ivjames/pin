@@ -22,7 +22,8 @@ droplet as root:
 2. `Open output`, drag that window to the projector, click it (or press F) for fullscreen. The output size
    switches to that display's pixel size on its own, so the projection and every export match the device.
    If the sizes ever differ, the picture is letterboxed, never stretched.
-3. `+ Quad` or `+ Box`, then drag the corners until they sit on the real surface. `Guides` draws outlines and
+3. Add a shape from the `Add` panel (Quad, Box, or a preset mask), then drag the corners until they sit on
+   the real surface. `Guides` draws outlines and
    a crosshair on the projector while you align; `Test pattern` shows a grid.
 4. Import video or images (button or drag and drop), select a shape, click a media item.
 5. `Export` for MP4, SVG outlines, or the JSON layout.
@@ -58,6 +59,26 @@ or adding or deleting a mask point, separates them. `Reset mask to quad` joins t
 
 Quad corners that sit exactly on each other move together; snapping one onto another joins them.
 Pinch never zooms the page, only the canvas. Each layer has its own opacity slider in the Layers list.
+
+## Shapes and SVG
+
+The `Add` panel has Quad and Box plus preset masks: Triangle, Circle, Hexagon, Star and Arrow. A preset is a
+mask with its own upright quad around it, and it is regular in output pixels, so a circle stays round on any
+output size.
+
+`SVG file` imports shapes: every closed outline in the file (`path`, `rect`, `circle`, `ellipse`, `polygon`,
+`polyline`) becomes one mask, fitted to the output with its proportions kept. Curves are sampled and
+simplified to at most 72 points. Plain hex fill colours carry over. Text, images, `use` references, open
+lines and anything in `defs` are skipped, and a hole in a compound path becomes its own shape rather than a
+hole. To use an SVG as artwork instead, import it under Media; it is drawn as an image.
+
+## Layout
+
+Every control is on screen at all times. The bar under the top bar holds everything for the selected shape,
+including Duplicate and Delete; it wraps onto more lines when the window is narrow and takes the room from
+the canvas. Only the Layers and Media lists scroll, and only when they hold more rows than fit.
+
+`Test pattern` is always drawn behind every shape.
 
 ## Output size and orientation
 
