@@ -144,7 +144,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 
 /**
  * SVG of every shape outline at output resolution, for use as a template in Photoshop, Illustrator, etc.
- * Shapes are white on a black background layer; content frames of non-quad shapes go in a separate group.
+ * Masks are white on a black background layer; the content quads of shapes whose mask differs go in a separate group.
  */
 export function buildSVG(project) {
   const { w, h } = project.output;
@@ -164,8 +164,8 @@ export function buildSVG(project) {
     const id = idFor(s.name, i);
     const hidden = s.visible ? '' : ' display="none"';
     outlines.push(`    <polygon id="${id}" points="${poly(s.pts)}"${hidden}><title>${esc(s.name)}</title></polygon>`);
-    if (s.pts.length !== 4) {
-      frames.push(`    <polygon id="${id}_frame" points="${poly(effectiveFrame(s))}"><title>${esc(s.name)} content frame</title></polygon>`);
+    if (s.frame || s.pts.length !== 4) {
+      frames.push(`    <polygon id="${id}_quad" points="${poly(effectiveFrame(s))}"><title>${esc(s.name)} content quad</title></polygon>`);
     }
   });
   return [
@@ -173,11 +173,11 @@ export function buildSVG(project) {
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`,
     `  <title>${esc(project.name)} - Cornerpin outlines</title>`,
     `  <g id="background"><rect width="${w}" height="${h}" fill="#000000"/></g>`,
-    '  <g id="outlines" fill="#ffffff" stroke="none">',
+    '  <g id="masks" fill="#ffffff" stroke="none">',
     ...outlines,
     '  </g>',
     ...(frames.length
-      ? ['  <g id="content_frames" fill="none" stroke="#00d1ff" stroke-width="2" stroke-dasharray="8 6">', ...frames, '  </g>']
+      ? ['  <g id="content_quads" fill="none" stroke="#00d1ff" stroke-width="2" stroke-dasharray="8 6">', ...frames, '  </g>']
       : []),
     '</svg>',
     '',

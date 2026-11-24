@@ -164,11 +164,17 @@ export function hexToRgb(hex) {
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 }
 
-/** The 4-corner content frame actually used for a shape. */
+/**
+ * The 4-corner quad that warps a shape's content.
+ * `frame: null` on a 4-point shape means the mask follows the quad (they are the same points).
+ */
 export function effectiveFrame(shape) {
-  if (shape.pts.length === 4) return shape.pts;
-  return shape.frame || bboxFrame(shape.pts);
+  if (shape.frame) return shape.frame;
+  return shape.pts.length === 4 ? shape.pts : bboxFrame(shape.pts);
 }
+
+/** True when the mask and the quad are one and the same set of points. */
+export const isLinked = (shape) => !shape.frame && shape.pts.length === 4;
 
 export class Renderer {
   constructor(canvas) {

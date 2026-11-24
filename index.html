@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Cornerpin</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23121317'/%3E%3Cpath d='M6 9l20-3-3 20-15-4z' fill='%23ffb020'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="css/app.css">
@@ -12,17 +12,14 @@
   <strong class="brand">Cornerpin</strong>
   <input id="projName" class="name" type="text" aria-label="Project name" spellcheck="false">
   <span class="sep"></span>
-  <button id="addQuad" title="Add a 4-corner surface">+ Quad</button>
-  <button id="addBox" title="Add three quads with shared corners">+ Box</button>
-  <button id="undo" title="Undo (Cmd+Z)">Undo</button>
-  <button id="redo" title="Redo (Shift+Cmd+Z)">Redo</button>
-  <span class="sep"></span>
   <button id="openOut" class="primary" title="Open the projector window">Open output</button>
-  <select id="outSize" aria-label="Output size" title="Output size in pixels"></select>
+  <select id="outSize" aria-label="Output size" title="Output size in pixels. Set this to the projector's native resolution."></select>
   <span id="customSize" hidden>
     <input id="outW" type="number" min="16" max="8192" step="2" aria-label="Output width"> x
     <input id="outH" type="number" min="16" max="8192" step="2" aria-label="Output height">
   </span>
+  <button id="rotateOut" title="Swap output width and height (landscape / portrait)">Rotate</button>
+  <span id="outInfo" class="info"></span>
   <label class="chk" title="Show outlines and points on the projector while aligning (G)"><input id="guides" type="checkbox" checked> Guides</label>
   <label class="chk" title="Show an alignment grid behind the shapes"><input id="testPattern" type="checkbox"> Test pattern</label>
   <button id="playPause" title="Play or pause (Space)">Pause</button>
@@ -32,31 +29,59 @@
   <button id="newProj" title="Clear all shapes (undoable)">New</button>
 </header>
 
-<main id="main">
-  <section id="stage">
-    <canvas id="scene"></canvas>
-    <canvas id="overlay"></canvas>
-    <div id="empty" hidden>Add a quad or a box to start mapping.</div>
+<nav id="rail" aria-label="Tools">
+  <button id="addQuad" class="big add" title="Add a 4-corner surface"><span class="ico">+</span>Quad</button>
+  <button id="addBox" class="big add" title="Add three quads with shared corners"><span class="ico">+</span>Box</button>
+  <hr>
+  <button id="toolSelect" class="big tool" data-tool="select" title="Select and move (V or Esc)">Select</button>
+  <button id="toolAdd" class="big tool" data-tool="add" title="Add a mask point: click this, then click where the point goes (A)">Add point</button>
+  <button id="toolDel" class="big tool" data-tool="delete" title="Delete a mask point: click this, then click the point (D)">Delete point</button>
+  <hr>
+  <button id="undo" class="big" title="Undo (Cmd+Z)">Undo</button>
+  <button id="redo" class="big" title="Redo (Shift+Cmd+Z)">Redo</button>
+</nav>
+
+<section id="stage">
+  <canvas id="scene"></canvas>
+  <canvas id="overlay"></canvas>
+  <div id="targetBar" role="group" aria-label="What the handles edit">
+    <span class="lbl">Editing</span>
+    <button id="tgtQuad" class="tgt quad" data-target="quad" title="Quad: the 4 corners the content is warped to (Q)">Quad <small>content corners</small></button>
+    <button id="tgtMask" class="tgt mask" data-target="mask" title="Mask: the outline that decides what part is visible (M)">Mask <small>visible area</small></button>
+    <span id="linkState" class="state"></span>
+  </div>
+  <div id="toolHint" hidden></div>
+  <div id="zoomBar" role="group" aria-label="Canvas zoom">
+    <button id="zoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button>
+    <button id="zoomFit" title="Fit the canvas to the window (0)">Fit</button>
+    <button id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
+    <span id="zoomPct">100%</span>
+  </div>
+  <div id="empty" hidden>
+    <p>Add a surface to start mapping.</p>
+    <button id="emptyQuad" class="primary huge">+ Quad</button>
+    <button id="emptyBox" class="primary huge">+ Box</button>
+  </div>
+</section>
+
+<aside id="dock">
+  <section id="dockLayers">
+    <h2>Layers</h2>
+    <div id="layers" class="scroll"></div>
   </section>
-  <aside id="side">
-    <section>
-      <h2>Layers</h2>
-      <div id="layers"></div>
-    </section>
-    <section>
-      <h2>Shape</h2>
-      <div id="props"></div>
-    </section>
-    <section>
-      <h2>Media <button id="importMedia" class="small">Import</button></h2>
-      <div id="mediaList"></div>
-      <input id="fileInput" type="file" accept="video/*,image/*" multiple hidden>
-    </section>
-  </aside>
-</main>
+  <section id="dockShape">
+    <h2>Shape</h2>
+    <div id="props" class="scroll"></div>
+  </section>
+  <section id="dockMedia">
+    <h2>Media <button id="importMedia" class="small">Import</button></h2>
+    <div id="mediaList" class="scroll"></div>
+    <input id="fileInput" type="file" accept="video/*,image/*" multiple hidden>
+  </section>
+</aside>
 
 <footer id="status">
-  <span id="hint">Drag points to align. Click an edge to add a point. Delete removes it. Hold Cmd to skip snapping, Option to move one corner of a shared set. Arrows nudge 1 px (Shift: 10).</span>
+  <span id="hint">Drag handles to align. Hold Cmd to skip snapping, Option to move one corner of a shared set. Arrows nudge 1 px (Shift: 10). Pinch or Ctrl+scroll zooms the canvas; two-finger scroll pans.</span>
   <span class="grow"></span>
   <span id="msg"></span>
   <span id="storage"></span>
@@ -85,7 +110,7 @@
     <fieldset>
       <legend>Shapes and layout</legend>
       <div class="actions">
-        <button id="exSVG" type="button" title="Shape outlines at output size, for Photoshop or Illustrator">Export SVG</button>
+        <button id="exSVG" type="button" title="Mask outlines at output size, for Photoshop or Illustrator">Export SVG</button>
         <button id="exJSON" type="button" title="Layout without media">Export JSON</button>
         <button id="imJSON" type="button">Import JSON</button>
       </div>
